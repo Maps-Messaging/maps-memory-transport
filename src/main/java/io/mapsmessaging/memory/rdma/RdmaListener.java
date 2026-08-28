@@ -78,7 +78,7 @@ public final class RdmaListener implements AutoCloseable {
       throw new IOException("RDMA listener is closed");
     }
     int accepted = nativeAccess.accept(socket);
-    return RdmaTransport.accepted(nativeAccess, accepted, ioBufferSize);
+    return RdmaTransport.accepted(accepted, ioBufferSize);
   }
 
   public InetSocketAddress localAddress() {
