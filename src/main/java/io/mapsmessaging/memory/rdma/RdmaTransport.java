@@ -10,10 +10,10 @@ import io.mapsmessaging.memory.MemoryTransport;
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.security.SecureRandom;
-import java.net.InetSocketAddress;
 
 public final class RdmaTransport implements MemoryTransport {
 
@@ -68,14 +68,14 @@ public final class RdmaTransport implements MemoryTransport {
     }
   }
 
-  static RdmaTransport accepted(RdmaNative acceptNative, int socket, int ioBufferSize) throws IOException {
+  static RdmaTransport accepted(int socket, int ioBufferSize) throws IOException {
     validateBufferSize(ioBufferSize);
     RdmaNative nativeAccess = new RdmaNative();
     try {
       InetSocketAddress remote = nativeAccess.peerAddress(socket);
       return new RdmaTransport(nativeAccess, socket, remote, ioBufferSize, false);
     } catch (Throwable throwable) {
-      acceptNative.closeSocket(socket);
+      nativeAccess.closeSocket(socket);
       nativeAccess.close();
       if (throwable instanceof IOException ioException) {
         throw ioException;
@@ -104,7 +104,7 @@ public final class RdmaTransport implements MemoryTransport {
     try {
       peerSessionId = client ? clientHandshake() : serverHandshake();
     } catch (Throwable throwable) {
-      closeResources();
+      arena.close();
       if (throwable instanceof IOException ioException) {
         throw ioException;
       }
