@@ -6,5 +6,6 @@
  */
 module io.mapsmessaging.memory {
   exports io.mapsmessaging.memory;
+  exports io.mapsmessaging.memory.rdma;
   exports io.mapsmessaging.memory.shm;
 }
