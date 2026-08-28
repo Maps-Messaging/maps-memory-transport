@@ -111,15 +111,12 @@ public final class SharedMemoryTransport implements MemoryTransport {
 
   private static void initialise(FileChannel channel, long regionSize, int slotSize, int slotCount) throws IOException {
     try (var ignored = channel.lock()) {
-      if (channel.size() != regionSize) {
-        channel.truncate(0);
+      long existingSize = channel.size();
+      if (existingSize == 0) {
         channel.position(regionSize - 1);
         channel.write(ByteBuffer.wrap(new byte[] {0}));
-      }
-      try (Arena initArena = Arena.ofConfined()) {
-        MemorySegment segment = channel.map(FileChannel.MapMode.READ_WRITE, 0, regionSize, initArena);
-        int magic = segment.get(ValueLayout.JAVA_INT, MAGIC_OFFSET);
-        if (magic != MAGIC) {
+        try (Arena initArena = Arena.ofConfined()) {
+          MemorySegment segment = channel.map(FileChannel.MapMode.READ_WRITE, 0, regionSize, initArena);
           segment.fill((byte) 0);
           segment.set(ValueLayout.JAVA_INT, MAGIC_OFFSET, MAGIC);
           segment.set(ValueLayout.JAVA_INT, VERSION_OFFSET, VERSION);
@@ -127,6 +124,20 @@ public final class SharedMemoryTransport implements MemoryTransport {
           segment.set(ValueLayout.JAVA_INT, SLOT_COUNT_OFFSET, slotCount);
           segment.force();
         }
+        return;
+      }
+
+      if (existingSize != regionSize) {
+        throw new IOException(
+            "Shared memory region size does not match requested configuration: existing="
+                + existingSize
+                + ", requested="
+                + regionSize);
+      }
+
+      try (Arena validationArena = Arena.ofConfined()) {
+        MemorySegment segment = channel.map(FileChannel.MapMode.READ_WRITE, 0, regionSize, validationArena);
+        validate(segment, slotSize, slotCount);
       }
     }
   }
