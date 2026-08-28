@@ -9,6 +9,7 @@ package io.mapsmessaging.memory.shm;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -115,6 +116,46 @@ class SharedMemoryTransportTest {
     }
     try (SharedMemoryTransport reopened = new SharedMemoryTransport(name, true, 1024, 8)) {
       assertEquals(path, reopened.path());
+    }
+  }
+
+  @Test
+  void rejectsDuplicateLiveSideOwnership() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    try (SharedMemoryTransport owner = new SharedMemoryTransport(name, true, 1024, 8)) {
+      IOException exception = assertThrows(IOException.class, () -> new SharedMemoryTransport(name, true, 1024, 8));
+      assertTrue(exception.getMessage().contains("already owned"));
+    }
+  }
+
+  @Test
+  void reportsPeerPresenceAndHeartbeat() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, 1024, 8)) {
+      assertFalse(a.peerPresent());
+      try (SharedMemoryTransport b = new SharedMemoryTransport(name, false, 1024, 8)) {
+        assertTrue(a.peerPresent());
+        assertTrue(b.peerPresent());
+        assertTrue(a.peerHeartbeatMillis() > 0);
+        assertTrue(b.peerHeartbeatMillis() > 0);
+      }
+      assertFalse(a.peerPresent());
+    }
+  }
+
+  @Test
+  void advancesGenerationWhenSideIsReopened() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    long firstGeneration;
+    long firstSession;
+    try (SharedMemoryTransport first = new SharedMemoryTransport(name, true, 1024, 8)) {
+      firstGeneration = first.generation();
+      firstSession = first.sessionId();
+    }
+
+    try (SharedMemoryTransport second = new SharedMemoryTransport(name, true, 1024, 8)) {
+      assertTrue(second.generation() > firstGeneration);
+      assertNotEquals(firstSession, second.sessionId());
     }
   }
 }
