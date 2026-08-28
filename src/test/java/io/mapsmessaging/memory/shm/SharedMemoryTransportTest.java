@@ -13,11 +13,15 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.mapsmessaging.memory.PeerGenerationChangedException;
+import io.mapsmessaging.memory.internal.MemoryRing;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -60,7 +64,7 @@ class SharedMemoryTransportTest {
   void handlesBoundaryPayloadSizes() throws Exception {
     int slotSize = 256;
     int slotCount = 4;
-    int slotPayload = slotSize - Integer.BYTES;
+    int slotPayload = slotSize - MemoryRing.SLOT_HEADER_SIZE;
     int ringPayload = slotPayload * slotCount;
     int[] sizes = {0, 1, slotPayload, slotPayload + 1, ringPayload};
 
@@ -91,7 +95,6 @@ class SharedMemoryTransportTest {
 
     try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, 1024, 8);
          SharedMemoryTransport b = new SharedMemoryTransport(name, false, 1024, 8)) {
-
       assertEquals(payload.length, a.write(ByteBuffer.wrap(payload)));
 
       ByteBuffer first = ByteBuffer.allocate(200);
@@ -111,18 +114,36 @@ class SharedMemoryTransportTest {
   }
 
   @Test
+  void supportsDirectByteBuffers() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    byte[] expected = payload(4096, 29);
+    try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, 1024, 8);
+         SharedMemoryTransport b = new SharedMemoryTransport(name, false, 1024, 8)) {
+      ByteBuffer source = ByteBuffer.allocateDirect(expected.length);
+      source.put(expected).flip();
+      ByteBuffer destination = ByteBuffer.allocateDirect(expected.length);
+      assertEquals(expected.length, a.write(source));
+      assertEquals(expected.length, b.read(destination));
+      destination.flip();
+      byte[] actual = new byte[destination.remaining()];
+      destination.get(actual);
+      assertArrayEquals(expected, actual);
+    }
+  }
+
+  @Test
   void appliesBackpressureWhenRingIsFull() throws Exception {
     String name = "test-" + UUID.randomUUID();
     try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, 256, 2);
          SharedMemoryTransport b = new SharedMemoryTransport(name, false, 256, 2)) {
-
+      int payloadPerSlot = 256 - MemoryRing.SLOT_HEADER_SIZE;
       byte[] payload = new byte[1000];
       int written = a.write(ByteBuffer.wrap(payload));
-      assertEquals((256 - Integer.BYTES) * 2, written);
+      assertEquals(payloadPerSlot * 2, written);
       assertFalse(a.canWrite());
 
-      ByteBuffer drain = ByteBuffer.allocate(256 - Integer.BYTES);
-      assertEquals(256 - Integer.BYTES, b.read(drain));
+      ByteBuffer drain = ByteBuffer.allocate(payloadPerSlot);
+      assertEquals(payloadPerSlot, b.read(drain));
       assertTrue(a.canWrite());
     }
   }
@@ -131,7 +152,7 @@ class SharedMemoryTransportTest {
   void streamsPayloadLargerThanEntireRingCapacity() throws Exception {
     int slotSize = 256;
     int slotCount = 4;
-    int ringPayload = (slotSize - Integer.BYTES) * slotCount;
+    int ringPayload = (slotSize - MemoryRing.SLOT_HEADER_SIZE) * slotCount;
     byte[] payload = payload(ringPayload * 7 + 37, 31);
     String name = "test-" + UUID.randomUUID();
 
@@ -226,9 +247,11 @@ class SharedMemoryTransportTest {
   }
 
   @Test
-  void rejectsInvalidConfiguration() {
+  void rejectsInvalidConfigurationAndUnsafeNames() {
     String name = "test-" + UUID.randomUUID();
     assertThrows(IllegalArgumentException.class, () -> new SharedMemoryTransport("", true, 1024, 8));
+    assertThrows(IllegalArgumentException.class, () -> new SharedMemoryTransport("../escape", true, 1024, 8));
+    assertThrows(IllegalArgumentException.class, () -> new SharedMemoryTransport("contains space", true, 1024, 8));
     assertThrows(IllegalArgumentException.class, () -> new SharedMemoryTransport(name, true, 255, 8));
     assertThrows(IllegalArgumentException.class, () -> new SharedMemoryTransport(name, true, 1024, 1));
   }
@@ -256,7 +279,7 @@ class SharedMemoryTransportTest {
   }
 
   @Test
-  void reportsPeerPresenceAndHeartbeat() throws Exception {
+  void reportsPeerPresenceHeartbeatAndGeneration() throws Exception {
     String name = "test-" + UUID.randomUUID();
     try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, 1024, 8)) {
       assertFalse(a.peerPresent());
@@ -265,6 +288,8 @@ class SharedMemoryTransportTest {
         assertTrue(b.peerPresent());
         assertTrue(a.peerHeartbeatMillis() > 0);
         assertTrue(b.peerHeartbeatMillis() > 0);
+        assertEquals(b.generation(), a.peerGeneration());
+        assertEquals(a.generation(), b.peerGeneration());
       }
       assertFalse(a.peerPresent());
     }
@@ -283,6 +308,81 @@ class SharedMemoryTransportTest {
     try (SharedMemoryTransport second = new SharedMemoryTransport(name, true, 1024, 8)) {
       assertTrue(second.generation() > firstGeneration);
       assertNotEquals(firstSession, second.sessionId());
+    }
+  }
+
+  @Test
+  void doesNotDeliverDataAddressedToPreviousPeerGeneration() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, 1024, 8)) {
+      SharedMemoryTransport b = new SharedMemoryTransport(name, false, 1024, 8);
+      assertEquals(8, a.write(ByteBuffer.wrap("old-data".getBytes(StandardCharsets.UTF_8))));
+      b.close();
+
+      try (SharedMemoryTransport replacement = new SharedMemoryTransport(name, false, 1024, 8)) {
+        assertTrue(replacement.hasData());
+        assertEquals(0, replacement.read(ByteBuffer.allocate(64)));
+        assertFalse(replacement.hasData());
+      }
+    }
+  }
+
+  @Test
+  void signalsPeerGenerationChangeBeforeMixingNewBytesWithPartialOldFrame() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, 1024, 8)) {
+      SharedMemoryTransport b = new SharedMemoryTransport(name, false, 1024, 8);
+      byte[] oldPayload = payload(100, 7);
+      assertEquals(oldPayload.length, b.write(ByteBuffer.wrap(oldPayload)));
+      assertEquals(10, a.read(ByteBuffer.allocate(10)));
+      b.close();
+
+      try (SharedMemoryTransport replacement = new SharedMemoryTransport(name, false, 1024, 8)) {
+        byte[] newPayload = "new-session".getBytes(StandardCharsets.UTF_8);
+        assertEquals(newPayload.length, replacement.write(ByteBuffer.wrap(newPayload)));
+        assertTrue(a.hasData());
+        assertThrows(PeerGenerationChangedException.class, () -> a.read(ByteBuffer.allocate(64)));
+
+        ByteBuffer destination = ByteBuffer.allocate(64);
+        assertEquals(newPayload.length, a.read(destination));
+        destination.flip();
+        byte[] actual = new byte[destination.remaining()];
+        destination.get(actual);
+        assertArrayEquals(newPayload, actual);
+      }
+    }
+  }
+
+  @Test
+  void closeIsIdempotentAndIoIsRejectedAfterClose() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    SharedMemoryTransport transport = new SharedMemoryTransport(name, true, 1024, 8);
+    transport.close();
+    transport.close();
+    assertFalse(transport.hasData());
+    assertFalse(transport.canWrite());
+    assertFalse(transport.peerPresent());
+    assertEquals(0, transport.peerHeartbeatMillis());
+    assertEquals(0, transport.peerGeneration());
+    assertThrows(IOException.class, () -> transport.write(ByteBuffer.wrap(new byte[] {1})));
+    assertThrows(IOException.class, () -> transport.read(ByteBuffer.allocate(1)));
+  }
+
+  @Test
+  void createsPrivatePosixFileWhenSupported() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    try (SharedMemoryTransport transport = new SharedMemoryTransport(name, true, 1024, 8)) {
+      try {
+        Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(transport.path());
+        assertFalse(permissions.contains(PosixFilePermission.GROUP_READ));
+        assertFalse(permissions.contains(PosixFilePermission.GROUP_WRITE));
+        assertFalse(permissions.contains(PosixFilePermission.GROUP_EXECUTE));
+        assertFalse(permissions.contains(PosixFilePermission.OTHERS_READ));
+        assertFalse(permissions.contains(PosixFilePermission.OTHERS_WRITE));
+        assertFalse(permissions.contains(PosixFilePermission.OTHERS_EXECUTE));
+      } catch (UnsupportedOperationException ignored) {
+        // Non-POSIX platform.
+      }
     }
   }
 

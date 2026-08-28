@@ -7,18 +7,22 @@
 package io.mapsmessaging.memory.shm;
 
 import io.mapsmessaging.memory.MemoryTransport;
+import io.mapsmessaging.memory.PeerGenerationChangedException;
 import io.mapsmessaging.memory.internal.MemoryRing;
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
+import java.lang.invoke.VarHandle;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.security.SecureRandom;
-import java.util.Locale;
+import java.util.regex.Pattern;
 
 public final class SharedMemoryTransport implements MemoryTransport {
 
@@ -26,7 +30,7 @@ public final class SharedMemoryTransport implements MemoryTransport {
   public static final int DEFAULT_SLOT_COUNT = 256;
 
   private static final int MAGIC = 0x4d415053;
-  private static final int VERSION = 2;
+  private static final int VERSION = 3;
   private static final long HEADER_SIZE = 128;
   private static final long MAGIC_OFFSET = 0;
   private static final long VERSION_OFFSET = 4;
@@ -47,6 +51,8 @@ public final class SharedMemoryTransport implements MemoryTransport {
   private static final long B_GENERATION_OFFSET = 112;
 
   private static final SecureRandom RANDOM = new SecureRandom();
+  private static final VarHandle LONG_HANDLE = ValueLayout.JAVA_LONG.varHandle();
+  private static final Pattern NAME_PATTERN = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._-]{0,127}");
 
   private final Arena arena;
   private final FileChannel channel;
@@ -59,6 +65,7 @@ public final class SharedMemoryTransport implements MemoryTransport {
   private final long sessionId;
   private final long generation;
 
+  private volatile long observedPeerGeneration;
   private volatile boolean closed;
 
   public SharedMemoryTransport(String name, boolean sideA) throws IOException {
@@ -77,33 +84,37 @@ public final class SharedMemoryTransport implements MemoryTransport {
     ownerPid = ProcessHandle.current().pid();
     sessionId = newSessionId();
     path = resolvePath(name);
-    Files.createDirectories(path.getParent());
+    preparePath(path);
     long ringSize = (long) slotSize * slotCount;
     long regionSize = HEADER_SIZE + ringSize * 2;
 
     FileChannel openedChannel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE);
+    secureFile(path);
     Arena openedArena = null;
     MemorySegment mappedMemory = null;
-    long claimedGeneration = 0;
     boolean claimed = false;
     try {
       initialise(openedChannel, regionSize, slotSize, slotCount);
       openedArena = Arena.ofShared();
       mappedMemory = openedChannel.map(FileChannel.MapMode.READ_WRITE, 0, regionSize, openedArena);
       validate(mappedMemory, slotSize, slotCount);
-      claimedGeneration = claimSide(openedChannel, mappedMemory, sideA, ownerPid, sessionId);
+      long claimedGeneration = claimSide(openedChannel, mappedMemory, sideA, ownerPid, sessionId);
       claimed = true;
 
-      long aDataOffset = HEADER_SIZE;
-      long bDataOffset = HEADER_SIZE + ringSize;
-      MemoryRing aToB = new MemoryRing(mappedMemory, A_PRODUCER_OFFSET, A_CONSUMER_OFFSET, aDataOffset, slotSize, slotCount);
-      MemoryRing bToA = new MemoryRing(mappedMemory, B_PRODUCER_OFFSET, B_CONSUMER_OFFSET, bDataOffset, slotSize, slotCount);
-      transmitRing = sideA ? aToB : bToA;
-      receiveRing = sideA ? bToA : aToB;
       channel = openedChannel;
       arena = openedArena;
       memory = mappedMemory;
       generation = claimedGeneration;
+
+      long aDataOffset = HEADER_SIZE;
+      long bDataOffset = HEADER_SIZE + ringSize;
+      MemoryRing aToB =
+          new MemoryRing(mappedMemory, A_PRODUCER_OFFSET, A_CONSUMER_OFFSET, aDataOffset, slotSize, slotCount, () -> generation, this::peerGenerationRaw);
+      MemoryRing bToA =
+          new MemoryRing(mappedMemory, B_PRODUCER_OFFSET, B_CONSUMER_OFFSET, bDataOffset, slotSize, slotCount, this::peerGenerationRaw, () -> generation);
+      transmitRing = sideA ? aToB : bToA;
+      receiveRing = sideA ? bToA : aToB;
+      observedPeerGeneration = peerGenerationRaw();
       heartbeat();
     } catch (Throwable throwable) {
       if (claimed && mappedMemory != null) {
@@ -134,6 +145,7 @@ public final class SharedMemoryTransport implements MemoryTransport {
   public int read(ByteBuffer destination) throws IOException {
     ensureOpen();
     heartbeat();
+    checkPeerGeneration();
     return receiveRing.read(destination);
   }
 
@@ -143,7 +155,7 @@ public final class SharedMemoryTransport implements MemoryTransport {
       return false;
     }
     heartbeat();
-    return receiveRing.hasData();
+    return peerGenerationChanged() || receiveRing.hasData();
   }
 
   @Override
@@ -164,8 +176,8 @@ public final class SharedMemoryTransport implements MemoryTransport {
     if (closed) {
       return false;
     }
-    long pid = memory.get(ValueLayout.JAVA_LONG, peerOwnerPidOffset());
-    long peerSession = memory.get(ValueLayout.JAVA_LONG, peerSessionOffset());
+    long pid = getLongAcquire(memory, peerOwnerPidOffset());
+    long peerSession = getLongAcquire(memory, peerSessionOffset());
     return pid > 0 && peerSession != 0 && isAlive(pid);
   }
 
@@ -173,15 +185,19 @@ public final class SharedMemoryTransport implements MemoryTransport {
     if (closed) {
       return 0;
     }
-    return memory.get(ValueLayout.JAVA_LONG, peerHeartbeatOffset());
+    return getLongAcquire(memory, peerHeartbeatOffset());
+  }
+
+  public long generation() {
+    return generation;
+  }
+
+  public long peerGeneration() {
+    return closed ? 0 : peerGenerationRaw();
   }
 
   public Path path() {
     return path;
-  }
-
-  long generation() {
-    return generation;
   }
 
   long sessionId() {
@@ -189,24 +205,69 @@ public final class SharedMemoryTransport implements MemoryTransport {
   }
 
   @Override
-  public void close() throws IOException {
+  public synchronized void close() throws IOException {
     if (closed) {
       return;
     }
     closed = true;
     releaseSide(channel, memory, sideA, ownerPid, sessionId);
-    arena.close();
-    channel.close();
+
+    RuntimeException arenaFailure = null;
+    try {
+      arena.close();
+    } catch (RuntimeException exception) {
+      arenaFailure = exception;
+    }
+
+    try {
+      channel.close();
+    } catch (IOException exception) {
+      if (arenaFailure != null) {
+        exception.addSuppressed(arenaFailure);
+      }
+      throw exception;
+    }
+
+    if (arenaFailure != null) {
+      throw arenaFailure;
+    }
+  }
+
+  private void checkPeerGeneration() throws PeerGenerationChangedException {
+    long current = peerGenerationRaw();
+    long previous = observedPeerGeneration;
+    if (previous == 0 && current != 0) {
+      observedPeerGeneration = current;
+      return;
+    }
+    if (previous != 0 && current != 0 && previous != current) {
+      observedPeerGeneration = current;
+      throw new PeerGenerationChangedException(previous, current);
+    }
+  }
+
+  private boolean peerGenerationChanged() {
+    long current = peerGenerationRaw();
+    long previous = observedPeerGeneration;
+    if (previous == 0 && current != 0) {
+      observedPeerGeneration = current;
+      return false;
+    }
+    return previous != 0 && current != 0 && previous != current;
   }
 
   private void heartbeat() {
-    memory.set(ValueLayout.JAVA_LONG, ownHeartbeatOffset(), System.currentTimeMillis());
+    setLongRelease(memory, ownHeartbeatOffset(), System.currentTimeMillis());
   }
 
   private void ensureOpen() throws IOException {
     if (closed) {
       throw new IOException("Shared memory transport is closed");
     }
+  }
+
+  private long peerGenerationRaw() {
+    return getLongAcquire(memory, sideA ? B_GENERATION_OFFSET : A_GENERATION_OFFSET);
   }
 
   private long ownHeartbeatOffset() {
@@ -245,10 +306,7 @@ public final class SharedMemoryTransport implements MemoryTransport {
 
       if (existingSize != regionSize) {
         throw new IOException(
-            "Shared memory region size does not match requested configuration: existing="
-                + existingSize
-                + ", requested="
-                + regionSize);
+            "Shared memory region size does not match requested configuration: existing=" + existingSize + ", requested=" + regionSize);
       }
 
       try (Arena validationArena = Arena.ofConfined()) {
@@ -265,21 +323,21 @@ public final class SharedMemoryTransport implements MemoryTransport {
     long sideGenerationOffset = sideA ? A_GENERATION_OFFSET : B_GENERATION_OFFSET;
 
     try (var ignored = channel.lock()) {
-      long existingPid = segment.get(ValueLayout.JAVA_LONG, ownerOffset);
-      long existingSession = segment.get(ValueLayout.JAVA_LONG, sessionOffset);
+      long existingPid = getLongAcquire(segment, ownerOffset);
+      long existingSession = getLongAcquire(segment, sessionOffset);
       if (existingPid > 0 && existingSession != 0 && isAlive(existingPid)) {
         throw new IOException("Shared memory side " + (sideA ? "A" : "B") + " is already owned by live process " + existingPid);
       }
 
-      long nextGeneration = segment.get(ValueLayout.JAVA_LONG, GENERATION_OFFSET) + 1;
+      long nextGeneration = getLongAcquire(segment, GENERATION_OFFSET) + 1;
       if (nextGeneration <= 0) {
         nextGeneration = 1;
       }
-      segment.set(ValueLayout.JAVA_LONG, GENERATION_OFFSET, nextGeneration);
-      segment.set(ValueLayout.JAVA_LONG, ownerOffset, ownerPid);
-      segment.set(ValueLayout.JAVA_LONG, sessionOffset, sessionId);
-      segment.set(ValueLayout.JAVA_LONG, heartbeatOffset, System.currentTimeMillis());
-      segment.set(ValueLayout.JAVA_LONG, sideGenerationOffset, nextGeneration);
+      setLongRelease(segment, GENERATION_OFFSET, nextGeneration);
+      setLongRelease(segment, ownerOffset, ownerPid);
+      setLongRelease(segment, sessionOffset, sessionId);
+      setLongRelease(segment, heartbeatOffset, System.currentTimeMillis());
+      setLongRelease(segment, sideGenerationOffset, nextGeneration);
       segment.force();
       return nextGeneration;
     }
@@ -291,11 +349,10 @@ public final class SharedMemoryTransport implements MemoryTransport {
     long heartbeatOffset = sideA ? A_HEARTBEAT_OFFSET : B_HEARTBEAT_OFFSET;
 
     try (var ignored = channel.lock()) {
-      if (segment.get(ValueLayout.JAVA_LONG, ownerOffset) == ownerPid
-          && segment.get(ValueLayout.JAVA_LONG, sessionOffset) == sessionId) {
-        segment.set(ValueLayout.JAVA_LONG, ownerOffset, 0L);
-        segment.set(ValueLayout.JAVA_LONG, sessionOffset, 0L);
-        segment.set(ValueLayout.JAVA_LONG, heartbeatOffset, 0L);
+      if (getLongAcquire(segment, ownerOffset) == ownerPid && getLongAcquire(segment, sessionOffset) == sessionId) {
+        setLongRelease(segment, ownerOffset, 0L);
+        setLongRelease(segment, sessionOffset, 0L);
+        setLongRelease(segment, heartbeatOffset, 0L);
         segment.force();
       }
     } catch (IOException | IllegalStateException ignored) {
@@ -313,6 +370,14 @@ public final class SharedMemoryTransport implements MemoryTransport {
     }
   }
 
+  private static long getLongAcquire(MemorySegment segment, long offset) {
+    return (long) LONG_HANDLE.getAcquire(segment, offset);
+  }
+
+  private static void setLongRelease(MemorySegment segment, long offset, long value) {
+    LONG_HANDLE.setRelease(segment, offset, value);
+  }
+
   private static boolean isAlive(long pid) {
     return ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false);
   }
@@ -326,12 +391,39 @@ public final class SharedMemoryTransport implements MemoryTransport {
   }
 
   private static Path resolvePath(String name) {
-    if (name == null || name.isBlank()) {
-      throw new IllegalArgumentException("name must not be blank");
+    if (name == null || !NAME_PATTERN.matcher(name).matches()) {
+      throw new IllegalArgumentException("name must match " + NAME_PATTERN.pattern());
     }
-    String safeName = name.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9._-]", "_");
+    String user = System.getProperty("user.name", "unknown").replaceAll("[^A-Za-z0-9._-]", "_");
     Path sharedMemory = Path.of("/dev/shm");
-    Path base = Files.isDirectory(sharedMemory) ? sharedMemory.resolve("mapsmessaging") : Path.of(System.getProperty("java.io.tmpdir"), "mapsmessaging-shm");
-    return base.resolve(safeName + ".shm");
+    Path base =
+        Files.isDirectory(sharedMemory)
+            ? sharedMemory.resolve("mapsmessaging").resolve(user)
+            : Path.of(System.getProperty("java.io.tmpdir"), "mapsmessaging-shm", user);
+    return base.resolve(name + ".shm");
+  }
+
+  private static void preparePath(Path path) throws IOException {
+    Files.createDirectories(path.getParent());
+    secureDirectory(path.getParent());
+    if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) && Files.isSymbolicLink(path)) {
+      throw new IOException("Shared memory path must not be a symbolic link: " + path);
+    }
+  }
+
+  private static void secureDirectory(Path directory) throws IOException {
+    try {
+      Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
+    } catch (UnsupportedOperationException ignored) {
+      // Non-POSIX platform.
+    }
+  }
+
+  private static void secureFile(Path file) throws IOException {
+    try {
+      Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------"));
+    } catch (UnsupportedOperationException ignored) {
+      // Non-POSIX platform.
+    }
   }
 }

@@ -9,11 +9,14 @@ package io.mapsmessaging.memory.internal;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
+import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
+import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.Test;
 
 class MemoryRingTest {
@@ -49,9 +52,9 @@ class MemoryRingTest {
 
   @Test
   void streamsAcrossMultipleSlots() {
-    int slotSize = 32;
+    int slotSize = 64;
     int slotCount = 8;
-    int payloadPerSlot = slotSize - Integer.BYTES;
+    int payloadPerSlot = slotSize - MemoryRing.SLOT_HEADER_SIZE;
     long headerSize = 128;
 
     try (Arena arena = Arena.ofConfined()) {
@@ -76,7 +79,7 @@ class MemoryRingTest {
   void streamsPayloadLargerThanEntireRingCapacity() {
     int slotSize = 64;
     int slotCount = 4;
-    int payloadPerSlot = slotSize - Integer.BYTES;
+    int payloadPerSlot = slotSize - MemoryRing.SLOT_HEADER_SIZE;
     int ringPayloadCapacity = payloadPerSlot * slotCount;
     long headerSize = 128;
 
@@ -101,8 +104,7 @@ class MemoryRingTest {
         if (ring.hasData()) {
           totalRead += ring.read(destination);
         }
-        cycles++;
-        assertTrue(cycles < 100, "ring failed to make forward progress");
+        assertTrue(++cycles < 100, "ring failed to make forward progress");
       }
 
       assertEquals(payload.length, totalWritten);
@@ -112,6 +114,58 @@ class MemoryRingTest {
       byte[] actual = new byte[destination.remaining()];
       destination.get(actual);
       assertArrayEquals(payload, actual);
+    }
+  }
+
+  @Test
+  void discardsSlotsForOldWriterOrTargetGeneration() {
+    int slotSize = 128;
+    int slotCount = 4;
+    long headerSize = 128;
+    AtomicLong writerGeneration = new AtomicLong(1);
+    AtomicLong targetGeneration = new AtomicLong(10);
+
+    try (Arena arena = Arena.ofConfined()) {
+      MemorySegment segment = arena.allocate(headerSize + (long) slotSize * slotCount, 8);
+      MemoryRing ring =
+          new MemoryRing(
+              segment,
+              0,
+              8,
+              headerSize,
+              slotSize,
+              slotCount,
+              writerGeneration::get,
+              targetGeneration::get);
+
+      assertEquals(3, ring.write(ByteBuffer.wrap(new byte[] {1, 2, 3})));
+      writerGeneration.set(2);
+      assertEquals(0, ring.read(ByteBuffer.allocate(3)));
+      assertFalse(ring.hasData());
+
+      assertEquals(3, ring.write(ByteBuffer.wrap(new byte[] {4, 5, 6})));
+      targetGeneration.set(11);
+      assertEquals(0, ring.read(ByteBuffer.allocate(3)));
+      assertFalse(ring.hasData());
+    }
+  }
+
+  @Test
+  void rejectsCorruptCounters() {
+    int slotSize = 64;
+    int slotCount = 4;
+    long headerSize = 128;
+
+    try (Arena arena = Arena.ofConfined()) {
+      MemorySegment segment = arena.allocate(headerSize + (long) slotSize * slotCount, 8);
+      MemoryRing ring = new MemoryRing(segment, 0, 8, headerSize, slotSize, slotCount);
+
+      segment.set(ValueLayout.JAVA_LONG, 0, 10L);
+      segment.set(ValueLayout.JAVA_LONG, 8, 0L);
+      assertThrows(IllegalStateException.class, ring::availableSlots);
+      assertThrows(IllegalStateException.class, ring::hasData);
+      assertThrows(IllegalStateException.class, () -> ring.write(ByteBuffer.wrap(new byte[] {1})));
+      assertThrows(IllegalStateException.class, () -> ring.read(ByteBuffer.allocate(1)));
     }
   }
 }
