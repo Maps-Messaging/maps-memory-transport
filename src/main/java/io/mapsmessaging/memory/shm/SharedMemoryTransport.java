@@ -108,12 +108,49 @@ public final class SharedMemoryTransport implements MemoryTransport {
 
       long aDataOffset = HEADER_SIZE;
       long bDataOffset = HEADER_SIZE + ringSize;
-      MemoryRing aToB =
-          new MemoryRing(mappedMemory, A_PRODUCER_OFFSET, A_CONSUMER_OFFSET, aDataOffset, slotSize, slotCount, () -> generation, this::peerGenerationRaw);
-      MemoryRing bToA =
-          new MemoryRing(mappedMemory, B_PRODUCER_OFFSET, B_CONSUMER_OFFSET, bDataOffset, slotSize, slotCount, this::peerGenerationRaw, () -> generation);
-      transmitRing = sideA ? aToB : bToA;
-      receiveRing = sideA ? bToA : aToB;
+      if (sideA) {
+        transmitRing =
+            new MemoryRing(
+                mappedMemory,
+                A_PRODUCER_OFFSET,
+                A_CONSUMER_OFFSET,
+                aDataOffset,
+                slotSize,
+                slotCount,
+                () -> generation,
+                this::peerGenerationRaw);
+        receiveRing =
+            new MemoryRing(
+                mappedMemory,
+                B_PRODUCER_OFFSET,
+                B_CONSUMER_OFFSET,
+                bDataOffset,
+                slotSize,
+                slotCount,
+                this::peerGenerationRaw,
+                () -> generation);
+      } else {
+        transmitRing =
+            new MemoryRing(
+                mappedMemory,
+                B_PRODUCER_OFFSET,
+                B_CONSUMER_OFFSET,
+                bDataOffset,
+                slotSize,
+                slotCount,
+                () -> generation,
+                this::peerGenerationRaw);
+        receiveRing =
+            new MemoryRing(
+                mappedMemory,
+                A_PRODUCER_OFFSET,
+                A_CONSUMER_OFFSET,
+                aDataOffset,
+                slotSize,
+                slotCount,
+                this::peerGenerationRaw,
+                () -> generation);
+      }
       observedPeerGeneration = peerGenerationRaw();
       heartbeat();
     } catch (Throwable throwable) {
