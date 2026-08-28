@@ -17,7 +17,9 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 
 class SharedMemoryTransportTest {
@@ -109,7 +111,7 @@ class SharedMemoryTransportTest {
   @Test
   void canReopenExistingRegion() throws Exception {
     String name = "test-" + UUID.randomUUID();
-    java.nio.file.Path path;
+    Path path;
     try (SharedMemoryTransport first = new SharedMemoryTransport(name, true, 1024, 8)) {
       path = first.path();
       assertTrue(Files.exists(path));
@@ -156,6 +158,27 @@ class SharedMemoryTransportTest {
     try (SharedMemoryTransport second = new SharedMemoryTransport(name, true, 1024, 8)) {
       assertTrue(second.generation() > firstGeneration);
       assertNotEquals(firstSession, second.sessionId());
+    }
+  }
+
+  @Test
+  void reclaimsSideAfterOwnerProcessCrashes() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    Path javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java");
+    Process process = new ProcessBuilder(
+        javaExecutable.toString(),
+        "-cp",
+        System.getProperty("java.class.path"),
+        SharedMemoryCrashOwner.class.getName(),
+        name)
+        .inheritIO()
+        .start();
+
+    assertTrue(process.waitFor(10, TimeUnit.SECONDS));
+    assertEquals(0, process.exitValue());
+
+    try (SharedMemoryTransport replacement = new SharedMemoryTransport(name, true, 1024, 8)) {
+      assertTrue(replacement.generation() > 1);
     }
   }
 }
