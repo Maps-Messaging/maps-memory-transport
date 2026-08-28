@@ -71,4 +71,47 @@ class MemoryRingTest {
       assertArrayEquals(payload, actual);
     }
   }
+
+  @Test
+  void streamsPayloadLargerThanEntireRingCapacity() {
+    int slotSize = 64;
+    int slotCount = 4;
+    int payloadPerSlot = slotSize - Integer.BYTES;
+    int ringPayloadCapacity = payloadPerSlot * slotCount;
+    long headerSize = 128;
+
+    byte[] payload = new byte[ringPayloadCapacity * 5 + 17];
+    for (int i = 0; i < payload.length; i++) {
+      payload[i] = (byte) (i * 31);
+    }
+
+    try (Arena arena = Arena.ofConfined()) {
+      MemorySegment segment = arena.allocate(headerSize + (long) slotSize * slotCount, 8);
+      MemoryRing ring = new MemoryRing(segment, 0, 8, headerSize, slotSize, slotCount);
+      ByteBuffer source = ByteBuffer.wrap(payload);
+      ByteBuffer destination = ByteBuffer.allocate(payload.length);
+
+      int totalWritten = 0;
+      int totalRead = 0;
+      int cycles = 0;
+      while (source.hasRemaining() || ring.hasData()) {
+        if (source.hasRemaining()) {
+          totalWritten += ring.write(source);
+        }
+        if (ring.hasData()) {
+          totalRead += ring.read(destination);
+        }
+        cycles++;
+        assertTrue(cycles < 100, "ring failed to make forward progress");
+      }
+
+      assertEquals(payload.length, totalWritten);
+      assertEquals(payload.length, totalRead);
+      assertEquals(slotCount, ring.availableSlots());
+      destination.flip();
+      byte[] actual = new byte[destination.remaining()];
+      destination.get(actual);
+      assertArrayEquals(payload, actual);
+    }
+  }
 }
