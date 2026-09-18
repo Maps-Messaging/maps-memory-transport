@@ -20,6 +20,8 @@
   </licenses>
 
   <properties>
+    <dependency.check.autoUpdate>true</dependency.check.autoUpdate>
+    <dependency.check.dataDirectory>${user.home}/.m2/repository/org/owasp/dependency-check-data/</dependency.check.dataDirectory>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <maven.compiler.release>25</maven.compiler.release>
     <junit.version>5.13.4</junit.version>
@@ -49,6 +51,42 @@
           <useModulePath>false</useModulePath>
         </configuration>
       </plugin>
-    </plugins>
+          <plugin>
+        <groupId>org.owasp</groupId>
+        <artifactId>dependency-check-maven</artifactId>
+        <version>13.0.0</version>
+        <configuration>
+          <autoUpdate>${dependency.check.autoUpdate}</autoUpdate>
+          <dataDirectory>${dependency.check.dataDirectory}</dataDirectory>
+          <failBuildOnCVSS>10</failBuildOnCVSS>
+          <failOnError>false</failOnError>
+          <skipArtifactType>test-jar</skipArtifactType>
+          <skipTestScope>true</skipTestScope>
+        </configuration>
+        <executions>
+          <execution>
+            <goals>
+              <goal>check</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+</plugins>
   </build>
+  <profiles>
+    <profile>
+      <id>buildkite-dependency-check-cache</id>
+      <activation>
+        <property>
+          <name>env.BUILDKITE</name>
+          <value>true</value>
+        </property>
+      </activation>
+      <properties>
+        <dependency.check.autoUpdate>false</dependency.check.autoUpdate>
+        <dependency.check.dataDirectory>/var/cache/dependency-check/13</dependency.check.dataDirectory>
+      </properties>
+    </profile>
+  </profiles>
+
 </project>
