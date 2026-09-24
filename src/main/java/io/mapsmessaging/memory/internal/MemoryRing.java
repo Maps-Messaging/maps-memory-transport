@@ -142,7 +142,7 @@ public final class MemoryRing {
   }
 
   private long slotOffset(long sequence) {
-    return dataOffset + (sequence % slotCount) * slotSize;
+    return dataOffset + Long.remainderUnsigned(sequence, slotCount) * slotSize;
   }
 
   private long producerAcquire() {
