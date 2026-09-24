@@ -180,10 +180,15 @@ class SharedMemoryTransportMurphyTest {
     String name = name();
     int size = 512 * 1024;
     byte[] expected = payload(size, 91);
-    Process peer = process("echo", name, Integer.toString(size));
+    Path ready = marker("echo-ready");
+    Process peer = null;
 
     try (SharedMemoryTransport sideA =
         new SharedMemoryTransport(name, true, SLOT_SIZE, SLOT_COUNT)) {
+      peer = process("echo", name, Integer.toString(size), ready.toString());
+      awaitFile(ready, 10);
+      assertTrue(sideA.peerPresent(), "echo peer must be attached before the parent starts writing");
+
       ByteBuffer source = ByteBuffer.wrap(expected);
       long writeDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
       while (source.hasRemaining() && System.nanoTime() < writeDeadline) {
@@ -204,7 +209,14 @@ class SharedMemoryTransportMurphyTest {
           Thread.onSpinWait();
         }
       }
-      assertFalse(destination.hasRemaining(), "parent failed to receive complete echoed payload");
+      assertFalse(
+          destination.hasRemaining(),
+          "parent received "
+              + destination.position()
+              + "/"
+              + size
+              + " echoed bytes; peer "
+              + processState(peer));
 
       destination.flip();
       byte[] actual = new byte[destination.remaining()];
@@ -214,8 +226,11 @@ class SharedMemoryTransportMurphyTest {
       assertTrue(peer.waitFor(10, TimeUnit.SECONDS));
       assertEquals(0, peer.exitValue());
     } finally {
-      peer.destroyForcibly();
-      peer.waitFor(5, TimeUnit.SECONDS);
+      if (peer != null) {
+        peer.destroyForcibly();
+        peer.waitFor(5, TimeUnit.SECONDS);
+      }
+      Files.deleteIfExists(ready);
     }
   }
 
@@ -246,6 +261,13 @@ class SharedMemoryTransportMurphyTest {
     command[3] = SharedMemoryMurphyProcess.class.getName();
     System.arraycopy(arguments, 0, command, 4, arguments.length);
     return new ProcessBuilder(command).inheritIO().start();
+  }
+
+  private static String processState(Process process) {
+    if (process == null) {
+      return "was not started";
+    }
+    return process.isAlive() ? "is still running" : "exited with code " + process.exitValue();
   }
 
   private static Process awaitOneExit(Process first, Process second, int timeoutSeconds)

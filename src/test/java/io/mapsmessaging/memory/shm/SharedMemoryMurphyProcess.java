@@ -43,10 +43,13 @@ final class SharedMemoryMurphyProcess {
   private static void echo(String[] args) throws Exception {
     String name = args[1];
     int size = Integer.parseInt(args[2]);
+    Path ready = Path.of(args[3]);
     byte[] received = new byte[size];
 
     try (SharedMemoryTransport transport =
         new SharedMemoryTransport(name, false, SLOT_SIZE, SLOT_COUNT)) {
+      Files.writeString(ready, "ready");
+
       ByteBuffer destination = ByteBuffer.wrap(received);
       awaitRead(transport, destination, 15);
 
@@ -96,7 +99,12 @@ final class SharedMemoryMurphyProcess {
       }
     }
     if (destination.hasRemaining()) {
-      throw new AssertionError("timed out waiting for shared-memory input");
+      throw new AssertionError(
+          "timed out waiting for shared-memory input: read "
+              + destination.position()
+              + "/"
+              + destination.capacity()
+              + " bytes");
     }
   }
 
@@ -112,7 +120,12 @@ final class SharedMemoryMurphyProcess {
       }
     }
     if (source.hasRemaining()) {
-      throw new AssertionError("timed out waiting for shared-memory output capacity");
+      throw new AssertionError(
+          "timed out waiting for shared-memory output capacity: wrote "
+              + source.position()
+              + "/"
+              + source.limit()
+              + " bytes");
     }
   }
 

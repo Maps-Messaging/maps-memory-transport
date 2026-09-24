@@ -105,12 +105,13 @@ class MemoryRingMurphyTest {
 
   @Test
   void sequenceCountersCanCrossLongOverflowWithoutInvalidSlotAddressing() {
+    int slotCount = 3;
     try (Arena arena = Arena.ofConfined()) {
-      MemorySegment segment = allocateRing(arena);
+      MemorySegment segment = allocateRing(arena, slotCount);
       long start = Long.MAX_VALUE - 1;
       segment.set(ValueLayout.JAVA_LONG, 0, start);
       segment.set(ValueLayout.JAVA_LONG, 8, start);
-      MemoryRing ring = new MemoryRing(segment, 0, 8, HEADER_SIZE, SLOT_SIZE, SLOT_COUNT);
+      MemoryRing ring = new MemoryRing(segment, 0, 8, HEADER_SIZE, SLOT_SIZE, slotCount);
 
       for (int i = 0; i < 12; i++) {
         byte[] expected = new byte[] {(byte) i, (byte) (i + 1), (byte) (i + 2)};
@@ -127,6 +128,10 @@ class MemoryRingMurphyTest {
   }
 
   private static MemorySegment allocateRing(Arena arena) {
-    return arena.allocate(HEADER_SIZE + (long) SLOT_SIZE * SLOT_COUNT, 8);
+    return allocateRing(arena, SLOT_COUNT);
+  }
+
+  private static MemorySegment allocateRing(Arena arena, int slotCount) {
+    return arena.allocate(HEADER_SIZE + (long) SLOT_SIZE * slotCount, 8);
   }
 }
