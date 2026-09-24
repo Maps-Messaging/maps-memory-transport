@@ -7,19 +7,19 @@ package io.mapsmessaging.memory.benchmarks;
 
 import java.nio.ByteBuffer;
 
-enum BufferKind {
+public enum BufferKind {
   HEAP {
     @Override
-    ByteBuffer allocate(int size) {
+    public ByteBuffer allocate(int size) {
       return ByteBuffer.allocate(size);
     }
   },
   DIRECT {
     @Override
-    ByteBuffer allocate(int size) {
+    public ByteBuffer allocate(int size) {
       return ByteBuffer.allocateDirect(size);
     }
   };
 
-  abstract ByteBuffer allocate(int size);
+  public abstract ByteBuffer allocate(int size);
 }
