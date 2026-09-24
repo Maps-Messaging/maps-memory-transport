@@ -4,10 +4,10 @@ These benchmarks measure the shared-memory transport properties that matter for 
 
 ## Build
 
-First install the library snapshot from the repository root:
+First install the library snapshot from the repository root. Dependency-Check is skipped for this local benchmark preparation step because the benchmark harness does not require a vulnerability-data refresh:
 
 ```bash
-mvn --batch-mode --no-transfer-progress clean install
+mvn --batch-mode --no-transfer-progress -Ddependency-check.skip=true clean install
 ```
 
 Then build the standalone JMH harness:
