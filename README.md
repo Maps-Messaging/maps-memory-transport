@@ -74,6 +74,13 @@ To run the real RDMA loopback/integration path on a Linux host with an RDMA-capa
 
 Raw one-sided memory mapping remains an internal future optimisation. It can be added later without changing the public `MemoryTransport` API.
 
+
+## Benchmarks
+
+A standalone JMH harness lives under `benchmarks/`. It measures shared-memory round-trip latency, sustained one-way throughput, heap versus direct buffers, and can report allocation/GC behaviour using JMH profilers.
+
+See [benchmarks/README.md](benchmarks/README.md) for build and run commands.
+
 ## Java
 
 Java 25 is required.
