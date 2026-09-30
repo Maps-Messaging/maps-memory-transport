@@ -33,6 +33,8 @@ public final class RdmaTransport implements MemoryTransport {
   private final long sessionId;
   private final long peerSessionId;
 
+  // Only the reference is published; transport code does not mutate the published exception.
+  @SuppressWarnings("java:S3077")
   private volatile IOException terminalFailure;
   private volatile boolean closed;
 
@@ -55,16 +57,10 @@ public final class RdmaTransport implements MemoryTransport {
       socket = nativeAccess.createStreamSocket(resolveAddress(address));
       nativeAccess.connect(socket, address);
       return new RdmaTransport(nativeAccess, socket, nativeAccess.peerAddress(socket), ioBufferSize, true);
-    } catch (Throwable throwable) {
+    } catch (IOException | RuntimeException | Error throwable) {
       nativeAccess.closeSocket(socket);
       nativeAccess.close();
-      if (throwable instanceof IOException ioException) {
-        throw ioException;
-      }
-      if (throwable instanceof RuntimeException runtimeException) {
-        throw runtimeException;
-      }
-      throw new IOException("Unable to connect RDMA transport", throwable);
+      throw throwable;
     }
   }
 
@@ -74,16 +70,10 @@ public final class RdmaTransport implements MemoryTransport {
     try {
       InetSocketAddress remote = nativeAccess.peerAddress(socket);
       return new RdmaTransport(nativeAccess, socket, remote, ioBufferSize, false);
-    } catch (Throwable throwable) {
+    } catch (IOException | RuntimeException | Error throwable) {
       nativeAccess.closeSocket(socket);
       nativeAccess.close();
-      if (throwable instanceof IOException ioException) {
-        throw ioException;
-      }
-      if (throwable instanceof RuntimeException runtimeException) {
-        throw runtimeException;
-      }
-      throw new IOException("Unable to accept RDMA transport", throwable);
+      throw throwable;
     }
   }
 
@@ -97,18 +87,15 @@ public final class RdmaTransport implements MemoryTransport {
     this.socket = socket;
     this.remoteAddress = remoteAddress;
     arena = Arena.ofShared();
-    sendBuffer = arena.allocate(ioBufferSize, 8);
-    receiveBuffer = arena.allocate(ioBufferSize, 8);
     sessionId = newSessionId();
 
     try {
+      sendBuffer = arena.allocate(ioBufferSize, 8);
+      receiveBuffer = arena.allocate(ioBufferSize, 8);
       peerSessionId = client ? clientHandshake() : serverHandshake();
-    } catch (Throwable throwable) {
+    } catch (IOException | RuntimeException | Error throwable) {
       arena.close();
-      if (throwable instanceof IOException ioException) {
-        throw ioException;
-      }
-      throw new IOException("RDMA transport handshake failed", throwable);
+      throw throwable;
     }
   }
 

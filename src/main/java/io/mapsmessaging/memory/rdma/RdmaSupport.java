@@ -19,17 +19,21 @@ public final class RdmaSupport {
     }
 
     try (RdmaNative nativeAccess = new RdmaNative()) {
-      try {
-        int deviceCount = nativeAccess.deviceCount();
-        if (deviceCount == 0) {
-          return new RdmaAvailability(true, true, 0, "rdma-core libraries are available but no RDMA devices were found");
-        }
-        return new RdmaAvailability(true, true, deviceCount, "RDMA is available with " + deviceCount + " device(s)");
-      } catch (IOException exception) {
-        return new RdmaAvailability(true, true, 0, "rdma-core loaded but device enumeration failed: " + message(exception));
-      }
+      return probeDevices(nativeAccess);
     } catch (IOException | RuntimeException exception) {
       return new RdmaAvailability(true, false, 0, "RDMA native libraries are unavailable: " + message(exception));
+    }
+  }
+
+  private static RdmaAvailability probeDevices(RdmaNative nativeAccess) {
+    try {
+      int deviceCount = nativeAccess.deviceCount();
+      if (deviceCount == 0) {
+        return new RdmaAvailability(true, true, 0, "rdma-core libraries are available but no RDMA devices were found");
+      }
+      return new RdmaAvailability(true, true, deviceCount, "RDMA is available with " + deviceCount + " device(s)");
+    } catch (IOException exception) {
+      return new RdmaAvailability(true, true, 0, "rdma-core loaded but device enumeration failed: " + message(exception));
     }
   }
 

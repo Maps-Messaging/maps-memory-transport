@@ -53,16 +53,10 @@ public final class RdmaListener implements AutoCloseable {
       nativeAccess.listen(socket, backlog);
       InetSocketAddress localAddress = nativeAccess.localAddress(socket);
       return new RdmaListener(nativeAccess, socket, ioBufferSize, localAddress);
-    } catch (Throwable throwable) {
+    } catch (IOException | RuntimeException | Error throwable) {
       nativeAccess.closeSocket(socket);
       nativeAccess.close();
-      if (throwable instanceof IOException ioException) {
-        throw ioException;
-      }
-      if (throwable instanceof RuntimeException runtimeException) {
-        throw runtimeException;
-      }
-      throw new IOException("Unable to bind RDMA listener", throwable);
+      throw throwable;
     }
   }
 

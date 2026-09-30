@@ -6,6 +6,7 @@
  */
 package io.mapsmessaging.memory.rdma;
 
+import java.io.Closeable;
 import java.io.IOException;
 import java.lang.foreign.Arena;
 import java.lang.foreign.FunctionDescriptor;
@@ -50,7 +51,7 @@ final class RdmaNative implements AutoCloseable {
   private final Arena arena;
   private final SymbolLookup verbs;
   private final SymbolLookup rdmaCm;
-  private final ThreadLocal<MemorySegment> callState;
+  private final ThreadLocal<Integer> callState = new ThreadLocal<>();
 
   private final MethodHandle rsocket;
   private final MethodHandle rbind;
@@ -83,7 +84,6 @@ final class RdmaNative implements AutoCloseable {
       rgetpeername = intHandle("rgetpeername", ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS);
       rgetsockname = intHandle("rgetsockname", ValueLayout.JAVA_INT, ValueLayout.ADDRESS, ValueLayout.ADDRESS);
       rclose = intHandle("rclose", ValueLayout.JAVA_INT);
-      callState = ThreadLocal.withInitial(() -> arena.allocate(CAPTURED_STATE_LAYOUT));
     } catch (RuntimeException | IOException exception) {
       arena.close();
       if (exception instanceof IOException ioException) {
@@ -93,6 +93,7 @@ final class RdmaNative implements AutoCloseable {
     }
   }
 
+  @SuppressWarnings("java:S1181") // MethodHandle.invokeExact declares Throwable.
   int deviceCount() throws IOException {
     MethodHandle getDeviceList =
         LINKER.downcallHandle(
@@ -109,6 +110,9 @@ final class RdmaNative implements AutoCloseable {
       try {
         list = (MemorySegment) getDeviceList.invokeExact(count);
       } catch (Throwable throwable) {
+        if (throwable instanceof Error error) {
+          throw error;
+        }
         throw new IOException("Unable to enumerate RDMA devices", throwable);
       }
 
@@ -116,15 +120,21 @@ final class RdmaNative implements AutoCloseable {
         throw new IOException("ibv_get_device_list returned null");
       }
 
-      try {
+      try (Closeable _ = () -> releaseDeviceList(freeDeviceList, list)) {
         return Math.max(0, count.get(ValueLayout.JAVA_INT, 0));
-      } finally {
-        try {
-          freeDeviceList.invokeExact(list);
-        } catch (Throwable throwable) {
-          throw new IOException("Unable to release RDMA device list", throwable);
-        }
       }
+    }
+  }
+
+  @SuppressWarnings("java:S1181") // MethodHandle.invokeExact declares Throwable.
+  private static void releaseDeviceList(MethodHandle handle, MemorySegment list) throws IOException {
+    try {
+      handle.invokeExact(list);
+    } catch (Throwable throwable) {
+      if (throwable instanceof Error error) {
+        throw error;
+      }
+      throw new IOException("Unable to release RDMA device list", throwable);
     }
   }
 
@@ -228,14 +238,17 @@ final class RdmaNative implements AutoCloseable {
     if (fd >= 0) {
       try {
         invokeInt(rclose, fd);
-      } catch (IOException ignored) {
+      } catch (IOException _) {
         // Best effort close.
+      } finally {
+        callState.remove();
       }
     }
   }
 
   @Override
   public void close() {
+    callState.remove();
     arena.close();
   }
 
@@ -265,32 +278,52 @@ final class RdmaNative implements AutoCloseable {
         CAPTURE_ERRNO);
   }
 
+  @SuppressWarnings("java:S1181") // MethodHandle invocation declares Throwable.
   private int invokeInt(MethodHandle handle, Object... arguments) throws IOException {
-    MemorySegment state = callState.get();
-    try {
+    callState.remove();
+    try (Arena localArena = Arena.ofConfined()) {
+      MemorySegment state = localArena.allocate(CAPTURED_STATE_LAYOUT);
       Object[] invocation = new Object[arguments.length + 1];
       invocation[0] = state;
       System.arraycopy(arguments, 0, invocation, 1, arguments.length);
-      return (int) handle.invokeWithArguments(invocation);
+      int result = (int) handle.invokeWithArguments(invocation);
+      if (result < 0) {
+        callState.set((int) ERRNO_HANDLE.get(state, 0L));
+      }
+      return result;
     } catch (Throwable throwable) {
+      if (throwable instanceof Error error) {
+        throw error;
+      }
       throw new IOException("RDMA native invocation failed", throwable);
     }
   }
 
+  @SuppressWarnings("java:S1181") // MethodHandle invocation declares Throwable.
   private long invokeLong(MethodHandle handle, Object... arguments) throws IOException {
-    MemorySegment state = callState.get();
-    try {
+    callState.remove();
+    try (Arena localArena = Arena.ofConfined()) {
+      MemorySegment state = localArena.allocate(CAPTURED_STATE_LAYOUT);
       Object[] invocation = new Object[arguments.length + 1];
       invocation[0] = state;
       System.arraycopy(arguments, 0, invocation, 1, arguments.length);
-      return (long) handle.invokeWithArguments(invocation);
+      long result = (long) handle.invokeWithArguments(invocation);
+      if (result < 0) {
+        callState.set((int) ERRNO_HANDLE.get(state, 0L));
+      }
+      return result;
     } catch (Throwable throwable) {
+      if (throwable instanceof Error error) {
+        throw error;
+      }
       throw new IOException("RDMA native invocation failed", throwable);
     }
   }
 
   private int errno() {
-    return (int) ERRNO_HANDLE.get(callState.get(), 0L);
+    Integer errno = callState.get();
+    callState.remove();
+    return errno == null ? 0 : errno;
   }
 
   private IOException nativeFailure(String operation) {
