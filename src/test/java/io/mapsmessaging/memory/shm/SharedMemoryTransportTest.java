@@ -31,6 +31,7 @@ import org.junit.jupiter.api.Test;
 class SharedMemoryTransportTest {
 
   @Test
+  @SuppressWarnings("java:S2093") // Finally restores the user property and deletes fixtures; no resource is closed here.
   void rejectsSymbolicLinkInSharedMemoryDirectory() throws Exception {
     String originalUser = System.getProperty("user.name");
     String testUser = "symlink-" + UUID.randomUUID();
@@ -263,7 +264,7 @@ class SharedMemoryTransportTest {
   @Test
   void rejectsMismatchedLayout() throws Exception {
     String name = "test-" + UUID.randomUUID();
-    try (SharedMemoryTransport _ = new SharedMemoryTransport(name, true, 1024, 8)) {
+    try (var _ = new SharedMemoryTransport(name, true, 1024, 8)) {
       assertThrows(IOException.class, () -> new SharedMemoryTransport(name, false, 2048, 8));
       assertThrows(IOException.class, () -> new SharedMemoryTransport(name, false, 1024, 16));
     }
@@ -295,7 +296,7 @@ class SharedMemoryTransportTest {
   @Test
   void rejectsDuplicateLiveSideOwnership() throws Exception {
     String name = "test-" + UUID.randomUUID();
-    try (SharedMemoryTransport _ = new SharedMemoryTransport(name, true, 1024, 8)) {
+    try (var _ = new SharedMemoryTransport(name, true, 1024, 8)) {
       IOException exception = assertThrows(IOException.class, () -> new SharedMemoryTransport(name, true, 1024, 8));
       assertTrue(exception.getMessage().contains("already owned"));
     }

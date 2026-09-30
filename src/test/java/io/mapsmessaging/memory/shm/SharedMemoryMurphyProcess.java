@@ -66,7 +66,7 @@ final class SharedMemoryMurphyProcess {
     Path acquired = Path.of(args[5]);
 
     awaitFile(start, 10);
-    try (SharedMemoryTransport _ =
+    try (var _ =
         new SharedMemoryTransport(name, sideA, SLOT_SIZE, SLOT_COUNT)) {
       Files.writeString(acquired, "acquired");
       awaitFile(release, 10);

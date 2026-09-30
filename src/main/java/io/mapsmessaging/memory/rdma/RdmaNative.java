@@ -120,7 +120,7 @@ final class RdmaNative implements AutoCloseable {
         throw new IOException("ibv_get_device_list returned null");
       }
 
-      try (Closeable _ = () -> releaseDeviceList(freeDeviceList, list)) {
+      try (var _ = (Closeable) () -> releaseDeviceList(freeDeviceList, list)) {
         return Math.max(0, count.get(ValueLayout.JAVA_INT, 0));
       }
     }

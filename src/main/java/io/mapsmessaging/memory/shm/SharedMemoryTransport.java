@@ -73,7 +73,7 @@ public final class SharedMemoryTransport implements MemoryTransport {
   }
 
   // The channel remains open for ownership locks until close(); failed construction closes it below.
-  @SuppressWarnings("java:S2095")
+  @SuppressWarnings({"java:S2095", "java:S1181"}) // Cleanup must also run on Error; the original is rethrown.
   public SharedMemoryTransport(String name, boolean sideA, int slotSize, int slotCount) throws IOException {
     if (slotSize < 256) {
       throw new IllegalArgumentException("slotSize must be at least 256 bytes");
@@ -435,6 +435,8 @@ public final class SharedMemoryTransport implements MemoryTransport {
     return value;
   }
 
+  // The public system root only hosts a checked, owner-only user directory; region opens reject symlinks.
+  @SuppressWarnings("java:S5443")
   private static Path resolvePath(String name) throws IOException {
     if (name == null || !NAME_PATTERN.matcher(name).matches()) {
       throw new IllegalArgumentException("name must match " + NAME_PATTERN.pattern());
@@ -456,7 +458,7 @@ public final class SharedMemoryTransport implements MemoryTransport {
       }
     }
     try {
-      Files.createDirectories(parent.getParent(), PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwxr-xr-x")));
+      createSharedNamespace(parent.getParent());
       Files.createDirectories(parent, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
     } catch (UnsupportedOperationException _) {
       Files.createDirectories(parent);
@@ -466,6 +468,12 @@ public final class SharedMemoryTransport implements MemoryTransport {
     if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) && Files.isSymbolicLink(path)) {
       throw new IOException("Shared memory path must not be a symbolic link: " + path);
     }
+  }
+
+  // This namespace contains only private user directories. 0755 permits traversal, never public writes.
+  @SuppressWarnings("java:S2612")
+  private static void createSharedNamespace(Path directory) throws IOException {
+    Files.createDirectories(directory, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwxr-xr-x")));
   }
 
   private static void validateDirectoryOwners(Path parent) throws IOException {
