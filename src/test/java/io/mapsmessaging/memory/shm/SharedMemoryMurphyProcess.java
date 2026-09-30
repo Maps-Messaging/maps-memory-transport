@@ -66,13 +66,14 @@ final class SharedMemoryMurphyProcess {
     Path acquired = Path.of(args[5]);
 
     awaitFile(start, 10);
-    try (SharedMemoryTransport ignored =
+    try (SharedMemoryTransport _ =
         new SharedMemoryTransport(name, sideA, SLOT_SIZE, SLOT_COUNT)) {
       Files.writeString(acquired, "acquired");
       awaitFile(release, 10);
     }
   }
 
+  @SuppressWarnings("java:S2925") // Deliberately keep the peer alive for the parent to kill during a partial read.
   private static void holdData(String[] args) throws Exception {
     String name = args[1];
     Path ready = Path.of(args[2]);
@@ -130,13 +131,7 @@ final class SharedMemoryMurphyProcess {
   }
 
   private static void awaitFile(Path path, int timeoutSeconds) throws Exception {
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
-    while (!Files.exists(path) && System.nanoTime() < deadline) {
-      Thread.sleep(5);
-    }
-    if (!Files.exists(path)) {
-      throw new AssertionError("timed out waiting for " + path);
-    }
+    SharedMemoryTestFiles.awaitFile(path, timeoutSeconds);
   }
 
   private static byte[] payload(int size, int seed) {

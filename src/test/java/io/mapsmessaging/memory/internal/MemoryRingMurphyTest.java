@@ -33,7 +33,8 @@ class MemoryRingMurphyTest {
       assertEquals(3, ring.write(ByteBuffer.wrap(new byte[] {1, 2, 3})));
       segment.set(ValueLayout.JAVA_INT, HEADER_SIZE, -1);
 
-      assertThrows(IllegalStateException.class, () -> ring.read(ByteBuffer.allocate(3)));
+      ByteBuffer buffer1 = ByteBuffer.allocate(3);
+      assertThrows(IllegalStateException.class, () -> ring.read(buffer1));
     }
   }
 
@@ -46,7 +47,8 @@ class MemoryRingMurphyTest {
       assertEquals(3, ring.write(ByteBuffer.wrap(new byte[] {1, 2, 3})));
       segment.set(ValueLayout.JAVA_INT, HEADER_SIZE, SLOT_SIZE);
 
-      assertThrows(IllegalStateException.class, () -> ring.read(ByteBuffer.allocate(3)));
+      ByteBuffer buffer2 = ByteBuffer.allocate(3);
+      assertThrows(IllegalStateException.class, () -> ring.read(buffer2));
     }
   }
 
@@ -61,7 +63,8 @@ class MemoryRingMurphyTest {
 
       segment.set(ValueLayout.JAVA_INT, HEADER_SIZE, 5);
 
-      assertThrows(IllegalStateException.class, () -> ring.read(ByteBuffer.allocate(4)));
+      ByteBuffer buffer1 = ByteBuffer.allocate(4);
+      assertThrows(IllegalStateException.class, () -> ring.read(buffer1));
     }
   }
 

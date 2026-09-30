@@ -26,31 +26,35 @@ class RdmaTransportTest {
   @Test
   void rejectsInvalidPublicConfiguration() {
     assertThrows(IllegalArgumentException.class, () -> RdmaTransport.connect((InetSocketAddress) null));
-    assertThrows(IllegalArgumentException.class, () -> RdmaTransport.connect(new InetSocketAddress("127.0.0.1", 0)));
+    InetSocketAddress zeroPort = new InetSocketAddress("127.0.0.1", 0);
+    InetSocketAddress loopback = new InetSocketAddress("127.0.0.1", 7471);
+    assertThrows(IllegalArgumentException.class, () -> RdmaTransport.connect(zeroPort));
     assertThrows(
         IllegalArgumentException.class,
-        () -> RdmaTransport.connect(new InetSocketAddress("127.0.0.1", 7471), 512));
+        () -> RdmaTransport.connect(loopback, 512));
 
     assertThrows(IllegalArgumentException.class, () -> RdmaListener.bind((InetSocketAddress) null));
     assertThrows(
         IllegalArgumentException.class,
-        () -> RdmaListener.bind(new InetSocketAddress("127.0.0.1", 7471), 0, RdmaTransport.DEFAULT_IO_BUFFER_SIZE));
+        () -> RdmaListener.bind(loopback, 0, RdmaTransport.DEFAULT_IO_BUFFER_SIZE));
     assertThrows(
         IllegalArgumentException.class,
-        () -> RdmaListener.bind(new InetSocketAddress("127.0.0.1", 7471), 1, 512));
+        () -> RdmaListener.bind(loopback, 1, 512));
   }
 
   @Test
   void failsGracefullyWhenRdmaIsUnavailable() {
+    InetSocketAddress loopback = new InetSocketAddress("127.0.0.1", 7471);
+    InetSocketAddress zeroPort = new InetSocketAddress("127.0.0.1", 0);
     RdmaAvailability availability = RdmaSupport.probe();
     assumeTrue(!availability.available(), "RDMA is available on this host");
 
     assertThrows(
         RdmaUnavailableException.class,
-        () -> RdmaTransport.connect(new InetSocketAddress("127.0.0.1", 7471)));
+        () -> RdmaTransport.connect(loopback));
     assertThrows(
         RdmaUnavailableException.class,
-        () -> RdmaListener.bind(new InetSocketAddress("127.0.0.1", 0)));
+        () -> RdmaListener.bind(zeroPort));
   }
 
   @Test

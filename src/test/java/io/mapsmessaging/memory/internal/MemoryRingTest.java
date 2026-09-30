@@ -164,8 +164,10 @@ class MemoryRingTest {
       segment.set(ValueLayout.JAVA_LONG, 8, 0L);
       assertThrows(IllegalStateException.class, ring::availableSlots);
       assertThrows(IllegalStateException.class, ring::hasData);
-      assertThrows(IllegalStateException.class, () -> ring.write(ByteBuffer.wrap(new byte[] {1})));
-      assertThrows(IllegalStateException.class, () -> ring.read(ByteBuffer.allocate(1)));
+      ByteBuffer buffer1 = ByteBuffer.wrap(new byte[] {1});
+      assertThrows(IllegalStateException.class, () -> ring.write(buffer1));
+      ByteBuffer destination = ByteBuffer.allocate(1);
+      assertThrows(IllegalStateException.class, () -> ring.read(destination));
     }
   }
 }

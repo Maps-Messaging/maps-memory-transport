@@ -72,6 +72,8 @@ public final class SharedMemoryTransport implements MemoryTransport {
     this(name, sideA, DEFAULT_SLOT_SIZE, DEFAULT_SLOT_COUNT);
   }
 
+  // The channel remains open for ownership locks until close(); failed construction closes it below.
+  @SuppressWarnings("java:S2095")
   public SharedMemoryTransport(String name, boolean sideA, int slotSize, int slotCount) throws IOException {
     if (slotSize < 256) {
       throw new IllegalArgumentException("slotSize must be at least 256 bytes");
@@ -88,12 +90,12 @@ public final class SharedMemoryTransport implements MemoryTransport {
     long ringSize = (long) slotSize * slotCount;
     long regionSize = HEADER_SIZE + ringSize * 2;
 
-    FileChannel openedChannel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE);
-    secureFile(path);
+    FileChannel openedChannel = FileChannel.open(path, StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE, LinkOption.NOFOLLOW_LINKS);
     Arena openedArena = null;
     MemorySegment mappedMemory = null;
     boolean claimed = false;
     try {
+      secureFile(path);
       initialise(openedChannel, regionSize, slotSize, slotCount);
       openedArena = Arena.ofShared();
       mappedMemory = openedChannel.map(FileChannel.MapMode.READ_WRITE, 0, regionSize, openedArena);
@@ -153,21 +155,27 @@ public final class SharedMemoryTransport implements MemoryTransport {
       }
       observedPeerGeneration = peerGenerationRaw();
       heartbeat();
-    } catch (Throwable throwable) {
-      if (claimed && mappedMemory != null) {
-        releaseSide(openedChannel, mappedMemory, sideA, ownerPid, sessionId);
+    } catch (IOException | RuntimeException | Error throwable) {
+      try {
+        if (claimed) {
+          releaseSide(openedChannel, mappedMemory, sideA, ownerPid, sessionId);
+        }
+      } catch (RuntimeException | Error cleanupFailure) {
+        throwable.addSuppressed(cleanupFailure);
       }
-      if (openedArena != null) {
-        openedArena.close();
+      try {
+        if (openedArena != null) {
+          openedArena.close();
+        }
+      } catch (RuntimeException | Error cleanupFailure) {
+        throwable.addSuppressed(cleanupFailure);
       }
-      openedChannel.close();
-      if (throwable instanceof IOException ioException) {
-        throw ioException;
+      try {
+        openedChannel.close();
+      } catch (IOException cleanupFailure) {
+        throwable.addSuppressed(cleanupFailure);
       }
-      if (throwable instanceof RuntimeException runtimeException) {
-        throw runtimeException;
-      }
-      throw new IOException("Unable to open shared memory transport", throwable);
+      throw throwable;
     }
   }
 
@@ -324,7 +332,7 @@ public final class SharedMemoryTransport implements MemoryTransport {
   }
 
   private static void initialise(FileChannel channel, long regionSize, int slotSize, int slotCount) throws IOException {
-    try (var ignored = channel.lock()) {
+    try (var _ = channel.lock()) {
       long existingSize = channel.size();
       if (existingSize == 0) {
         channel.position(regionSize - 1);
@@ -359,7 +367,7 @@ public final class SharedMemoryTransport implements MemoryTransport {
     long heartbeatOffset = sideA ? A_HEARTBEAT_OFFSET : B_HEARTBEAT_OFFSET;
     long sideGenerationOffset = sideA ? A_GENERATION_OFFSET : B_GENERATION_OFFSET;
 
-    try (var ignored = channel.lock()) {
+    try (var _ = channel.lock()) {
       long existingPid = getLongAcquire(segment, ownerOffset);
       long existingSession = getLongAcquire(segment, sessionOffset);
       if (existingPid > 0 && existingSession != 0 && isAlive(existingPid)) {
@@ -385,14 +393,14 @@ public final class SharedMemoryTransport implements MemoryTransport {
     long sessionOffset = sideA ? A_SESSION_OFFSET : B_SESSION_OFFSET;
     long heartbeatOffset = sideA ? A_HEARTBEAT_OFFSET : B_HEARTBEAT_OFFSET;
 
-    try (var ignored = channel.lock()) {
+    try (var _ = channel.lock()) {
       if (getLongAcquire(segment, ownerOffset) == ownerPid && getLongAcquire(segment, sessionOffset) == sessionId) {
         setLongRelease(segment, ownerOffset, 0L);
         setLongRelease(segment, sessionOffset, 0L);
         setLongRelease(segment, heartbeatOffset, 0L);
         segment.force();
       }
-    } catch (IOException | IllegalStateException ignored) {
+    } catch (IOException | IllegalStateException _) {
       // Best effort during close or failed construction.
     }
   }
@@ -427,7 +435,7 @@ public final class SharedMemoryTransport implements MemoryTransport {
     return value;
   }
 
-  private static Path resolvePath(String name) {
+  private static Path resolvePath(String name) throws IOException {
     if (name == null || !NAME_PATTERN.matcher(name).matches()) {
       throw new IllegalArgumentException("name must match " + NAME_PATTERN.pattern());
     }
@@ -435,23 +443,61 @@ public final class SharedMemoryTransport implements MemoryTransport {
     Path sharedMemory = Path.of("/dev/shm");
     Path base =
         Files.isDirectory(sharedMemory)
-            ? sharedMemory.resolve("mapsmessaging").resolve(user)
-            : Path.of(System.getProperty("java.io.tmpdir"), "mapsmessaging-shm", user);
+            ? sharedMemory.toRealPath().resolve("mapsmessaging").resolve(user)
+            : Path.of(System.getProperty("java.io.tmpdir")).toRealPath().resolve("mapsmessaging-shm").resolve(user);
     return base.resolve(name + ".shm");
   }
 
   private static void preparePath(Path path) throws IOException {
-    Files.createDirectories(path.getParent());
+    Path parent = path.getParent();
+    for (Path ancestor = parent; ancestor != null; ancestor = ancestor.getParent()) {
+      if (Files.isSymbolicLink(ancestor)) {
+        throw new IOException("Shared memory directory must not contain symbolic links: " + ancestor);
+      }
+    }
+    try {
+      Files.createDirectories(parent.getParent(), PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwxr-xr-x")));
+      Files.createDirectories(parent, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+    } catch (UnsupportedOperationException _) {
+      Files.createDirectories(parent);
+    }
+    validateDirectoryOwners(parent);
     secureDirectory(path.getParent());
     if (Files.exists(path, LinkOption.NOFOLLOW_LINKS) && Files.isSymbolicLink(path)) {
       throw new IOException("Shared memory path must not be a symbolic link: " + path);
     }
   }
 
+  private static void validateDirectoryOwners(Path parent) throws IOException {
+    if (!Files.getFileStore(parent).supportsFileAttributeView("posix")) {
+      return;
+    }
+    var lookup = parent.getFileSystem().getUserPrincipalLookupService();
+    var expectedOwner = lookup.lookupPrincipalByName(System.getProperty("user.name"));
+    if (!Files.getOwner(parent, LinkOption.NOFOLLOW_LINKS).equals(expectedOwner)) {
+      throw new IOException("Shared memory directory is owned by another user: " + parent);
+    }
+    Path base = parent.getParent();
+    var baseOwner = Files.getOwner(base, LinkOption.NOFOLLOW_LINKS);
+    boolean rootOwned = baseOwner.equals(lookup.lookupPrincipalByName("root"));
+    if (!rootOwned && !baseOwner.equals(expectedOwner)) {
+      throw new IOException("Shared memory base directory has an untrusted owner: " + base);
+    }
+    var permissions = Files.getPosixFilePermissions(base, LinkOption.NOFOLLOW_LINKS);
+    boolean publiclyWritable = permissions.contains(java.nio.file.attribute.PosixFilePermission.GROUP_WRITE)
+        || permissions.contains(java.nio.file.attribute.PosixFilePermission.OTHERS_WRITE);
+    // A root-provisioned shared base may serve several users when sticky-bit protection is present.
+    boolean sticky = base.getFileSystem().supportedFileAttributeViews().contains("unix")
+        && (((int) Files.getAttribute(base, "unix:mode", LinkOption.NOFOLLOW_LINKS)) & 01000) != 0;
+    if (publiclyWritable && (!rootOwned || !sticky)) {
+      throw new IOException("Shared memory base directory must not be writable by other users without root-owned sticky protection: " + base);
+    }
+  }
+
   private static void secureDirectory(Path directory) throws IOException {
     try {
       Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
-    } catch (UnsupportedOperationException ignored) {
+    } catch (UnsupportedOperationException _) {
       // Non-POSIX platform.
     }
   }
@@ -459,7 +505,7 @@ public final class SharedMemoryTransport implements MemoryTransport {
   private static void secureFile(Path file) throws IOException {
     try {
       Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------"));
-    } catch (UnsupportedOperationException ignored) {
+    } catch (UnsupportedOperationException _) {
       // Non-POSIX platform.
     }
   }
