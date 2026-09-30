@@ -31,6 +31,29 @@ import org.junit.jupiter.api.Test;
 class SharedMemoryTransportTest {
 
   @Test
+  void rejectsSymbolicLinkInSharedMemoryDirectory() throws Exception {
+    String originalUser = System.getProperty("user.name");
+    String testUser = "symlink-" + UUID.randomUUID();
+    Path sharedRoot = Files.isDirectory(Path.of("/dev/shm"))
+        ? Path.of("/dev/shm/mapsmessaging")
+        : Path.of(System.getProperty("java.io.tmpdir"), "mapsmessaging-shm");
+    Files.createDirectories(sharedRoot);
+    Path target = Files.createTempDirectory("maps-shm-directory-");
+    Path link = sharedRoot.resolve(testUser);
+    try {
+      Files.createSymbolicLink(link, target);
+      System.setProperty("user.name", testUser);
+      assertThrows(IOException.class, () -> new SharedMemoryTransport("test", true, 1024, 8));
+      assertFalse(Files.exists(target.resolve("test.shm")));
+    } finally {
+      System.setProperty("user.name", originalUser);
+      Files.deleteIfExists(link);
+      Files.deleteIfExists(target.resolve("test.shm"));
+      Files.deleteIfExists(target);
+    }
+  }
+
+  @Test
   void transfersBidirectionally() throws Exception {
     String name = "test-" + UUID.randomUUID();
     try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, 1024, 8);
@@ -240,7 +263,7 @@ class SharedMemoryTransportTest {
   @Test
   void rejectsMismatchedLayout() throws Exception {
     String name = "test-" + UUID.randomUUID();
-    try (SharedMemoryTransport ignored = new SharedMemoryTransport(name, true, 1024, 8)) {
+    try (SharedMemoryTransport _ = new SharedMemoryTransport(name, true, 1024, 8)) {
       assertThrows(IOException.class, () -> new SharedMemoryTransport(name, false, 2048, 8));
       assertThrows(IOException.class, () -> new SharedMemoryTransport(name, false, 1024, 16));
     }
@@ -272,7 +295,7 @@ class SharedMemoryTransportTest {
   @Test
   void rejectsDuplicateLiveSideOwnership() throws Exception {
     String name = "test-" + UUID.randomUUID();
-    try (SharedMemoryTransport owner = new SharedMemoryTransport(name, true, 1024, 8)) {
+    try (SharedMemoryTransport _ = new SharedMemoryTransport(name, true, 1024, 8)) {
       IOException exception = assertThrows(IOException.class, () -> new SharedMemoryTransport(name, true, 1024, 8));
       assertTrue(exception.getMessage().contains("already owned"));
     }
@@ -380,7 +403,7 @@ class SharedMemoryTransportTest {
         assertFalse(permissions.contains(PosixFilePermission.OTHERS_READ));
         assertFalse(permissions.contains(PosixFilePermission.OTHERS_WRITE));
         assertFalse(permissions.contains(PosixFilePermission.OTHERS_EXECUTE));
-      } catch (UnsupportedOperationException ignored) {
+      } catch (UnsupportedOperationException _) {
         // Non-POSIX platform.
       }
     }
