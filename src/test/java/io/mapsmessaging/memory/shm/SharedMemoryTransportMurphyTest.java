@@ -30,6 +30,7 @@ class SharedMemoryTransportMurphyTest {
   private static final int SLOT_COUNT = 8;
 
   @Test
+  @SuppressWarnings("java:S2093") // Finally deletes test files; no closeable resource is managed by this try.
   void rejectsCorruptMagicInExistingRegion() throws Exception {
     String name = name();
     Path path = createAndClose(name);
@@ -43,6 +44,7 @@ class SharedMemoryTransportMurphyTest {
   }
 
   @Test
+  @SuppressWarnings("java:S2093") // Finally deletes test files; no closeable resource is managed by this try.
   void rejectsCorruptVersionInExistingRegion() throws Exception {
     String name = name();
     Path path = createAndClose(name);
@@ -56,6 +58,7 @@ class SharedMemoryTransportMurphyTest {
   }
 
   @Test
+  @SuppressWarnings("java:S2093") // Finally deletes test files; no closeable resource is managed by this try.
   void rejectsTruncatedExistingRegion() throws Exception {
     String name = name();
     Path path = createAndClose(name);
@@ -71,6 +74,7 @@ class SharedMemoryTransportMurphyTest {
   }
 
   @Test
+  @SuppressWarnings("java:S2093") // Finally deletes test files; no closeable resource is managed by this try.
   void rejectsSymbolicLinkAtSharedMemoryPathWhenSupported() throws Exception {
     String name = name();
     Path path = createAndClose(name);
@@ -272,25 +276,12 @@ class SharedMemoryTransportMurphyTest {
 
   private static Process awaitOneExit(Process first, Process second, int timeoutSeconds)
       throws Exception {
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
-    while (System.nanoTime() < deadline) {
-      if (!first.isAlive()) {
-        return first;
-      }
-      if (!second.isAlive()) {
-        return second;
-      }
-      Thread.sleep(5);
-    }
-    throw new AssertionError("neither competing claimant exited before deadline");
+    return (Process) java.util.concurrent.CompletableFuture.anyOf(first.onExit(), second.onExit())
+        .get(timeoutSeconds, TimeUnit.SECONDS);
   }
 
   private static void awaitFile(Path path, int timeoutSeconds) throws Exception {
-    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
-    while (!Files.exists(path) && System.nanoTime() < deadline) {
-      Thread.sleep(5);
-    }
-    assertTrue(Files.exists(path), "timed out waiting for " + path);
+    SharedMemoryTestFiles.awaitFile(path, timeoutSeconds);
   }
 
   private static Path marker(String suffix) throws IOException {
