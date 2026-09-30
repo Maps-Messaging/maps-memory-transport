@@ -46,6 +46,7 @@ public final class RdmaTransport implements MemoryTransport {
     return connect(address, DEFAULT_IO_BUFFER_SIZE);
   }
 
+  @SuppressWarnings("java:S1181") // Release native resources on Error, then rethrow it unchanged.
   public static RdmaTransport connect(InetSocketAddress address, int ioBufferSize) throws IOException {
     validateAddress(address);
     validateBufferSize(ioBufferSize);
@@ -64,6 +65,7 @@ public final class RdmaTransport implements MemoryTransport {
     }
   }
 
+  @SuppressWarnings("java:S1181") // Release native resources on Error, then rethrow it unchanged.
   static RdmaTransport accepted(int socket, int ioBufferSize) throws IOException {
     validateBufferSize(ioBufferSize);
     RdmaNative nativeAccess = new RdmaNative();
@@ -77,6 +79,7 @@ public final class RdmaTransport implements MemoryTransport {
     }
   }
 
+  @SuppressWarnings("java:S1181") // Release native resources on Error, then rethrow it unchanged.
   private RdmaTransport(
       RdmaNative nativeAccess,
       int socket,

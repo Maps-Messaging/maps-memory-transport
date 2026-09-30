@@ -29,6 +29,7 @@ public final class RdmaListener implements AutoCloseable {
     return bind(address, DEFAULT_BACKLOG, RdmaTransport.DEFAULT_IO_BUFFER_SIZE);
   }
 
+  @SuppressWarnings("java:S1181") // Release native resources on Error, then rethrow it unchanged.
   public static RdmaListener bind(InetSocketAddress address, int backlog, int ioBufferSize) throws IOException {
     if (address == null) {
       throw new IllegalArgumentException("address must not be null");
