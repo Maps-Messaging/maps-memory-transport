@@ -34,6 +34,8 @@ public final class MemoryRing {
     this(memory, producerOffset, consumerOffset, dataOffset, slotSize, slotCount, () -> 0L, () -> 0L);
   }
 
+  // Explicit layout offsets and generation suppliers describe the two ring peers.
+  @SuppressWarnings("java:S107")
   public MemoryRing(
       MemorySegment memory,
       long producerOffset,
@@ -89,6 +91,8 @@ public final class MemoryRing {
     return written;
   }
 
+  // Empty/full-slot exits and stale-generation skipping are separate protocol cases.
+  @SuppressWarnings("java:S135")
   public int read(ByteBuffer destination) {
     int read = 0;
     while (destination.hasRemaining()) {
