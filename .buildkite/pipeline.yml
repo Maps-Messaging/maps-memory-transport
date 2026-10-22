@@ -1,5 +1,15 @@
 steps:
   - label: ":maven: Build and Deploy"
-    command: "bash .buildkite/build.sh"
+    command:
+      - export JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64
+      - export PATH="$${JAVA_HOME}/bin:$${PATH}"
+      - SONAR_TOKEN=$$(buildkite-agent secret get SONAR_TOKEN)
+      - export SONAR_TOKEN
+      - mvn clean deploy
+      - mvn sonar:sonar -Dsonar.token="$${SONAR_TOKEN}" -Dsonar.branch.name=development
+    plugins:
+      - test-collector#v1.0.0:
+          files: "target/surefire-reports/*.xml"
+          format: "junit"
     agents:
       queue: "java_build_queue_aws"
