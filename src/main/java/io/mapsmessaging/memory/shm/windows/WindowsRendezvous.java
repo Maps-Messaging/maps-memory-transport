@@ -226,8 +226,10 @@ public final class WindowsRendezvous implements AutoCloseable {
           if (WindowsNative.receiveByte(pipe, timeoutMillis) != 0x52) {
             throw new IOException("Windows server did not confirm attachment");
           }
+          MemorySegment authenticatedPipe = pipe;
           SecureSession session = security == null ? null : SecureWire.authenticate(security, false,
-              () -> WindowsNative.receiveByte(pipe, timeoutMillis), value -> WindowsNative.sendByte(pipe, value));
+              () -> WindowsNative.receiveByte(authenticatedPipe, timeoutMillis),
+              value -> WindowsNative.sendByte(authenticatedPipe, value));
           transport.start();
           return session == null ? transport : new ProtectedTransport(transport, session);
         } catch (IOException | RuntimeException exception) {
