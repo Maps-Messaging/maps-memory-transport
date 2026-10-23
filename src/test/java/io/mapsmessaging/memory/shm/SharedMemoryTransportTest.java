@@ -18,6 +18,7 @@ import io.mapsmessaging.memory.internal.MemoryRing;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystemException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
@@ -42,7 +43,16 @@ class SharedMemoryTransportTest {
     Path target = Files.createTempDirectory("maps-shm-directory-");
     Path link = sharedRoot.resolve(testUser);
     try {
-      Files.createSymbolicLink(link, target);
+      try {
+        Files.createSymbolicLink(link, target);
+      } catch (FileSystemException exception) {
+        String reason = exception.getReason();
+        boolean windowsPrivilegeMissing = System.getProperty("os.name", "").startsWith("Windows")
+            && reason != null && reason.toLowerCase(java.util.Locale.ROOT).contains("privilege");
+        org.junit.jupiter.api.Assumptions.assumeTrue(!windowsPrivilegeMissing,
+            "Windows does not permit symlink creation for this process: " + exception.getMessage());
+        throw exception;
+      }
       System.setProperty("user.name", testUser);
       assertThrows(IOException.class, () -> new SharedMemoryTransport("test", true, 1024, 8));
       assertFalse(Files.exists(target.resolve("test.shm")));
