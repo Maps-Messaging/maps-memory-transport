@@ -52,6 +52,7 @@ final class MacNative {
       ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT);
   private static final MethodHandle FSTAT = nativeMethod("fstat", ValueLayout.JAVA_INT,
       ValueLayout.JAVA_INT, ValueLayout.ADDRESS);
+  private static final MethodHandle GETPAGESIZE = nativeMethod("getpagesize", ValueLayout.JAVA_INT);
   private static final MethodHandle SHM_OPEN = nativeMethod("shm_open", ValueLayout.JAVA_INT,
       ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT);
   private static final MethodHandle SHM_UNLINK = nativeMethod("shm_unlink", ValueLayout.JAVA_INT, ValueLayout.ADDRESS);
@@ -289,9 +290,14 @@ final class MacNative {
       }
       actualSize = stat.get(ValueLayout.JAVA_LONG, 96);
     }
-    if (actualSize != size) {
-      throw new IOException("Received macOS shared-memory region has an unexpected size: expected="
-          + size + ", actual=" + actualSize);
+    int pageSize = integer(GETPAGESIZE);
+    if (pageSize <= 0 || (pageSize & (pageSize - 1)) != 0) {
+      throw new IOException("Invalid macOS VM page size: " + pageSize);
+    }
+    long roundedSize = Math.multiplyExact(Math.ceilDiv(size, (long) pageSize), (long) pageSize);
+    if (actualSize != roundedSize) {
+      throw new IOException("Received macOS shared-memory region has an unexpected size: requested="
+          + size + ", pageRounded=" + roundedSize + ", actual=" + actualSize);
     }
   }
 
