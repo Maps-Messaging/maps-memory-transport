@@ -124,7 +124,8 @@ public final class MemoryServer implements AutoCloseable {
     maxPendingConnections = config == null ? 0 : config.maxPendingConnections();
     handshakeTimeoutMillis = config == null ? HANDSHAKE_TIMEOUT_MILLIS : config.handshakeTimeoutMillis();
     negotiationSlots = config == null || config.maxNegotiations() == 0 ? null : new Semaphore(config.maxNegotiations());
-    acceptThread = Thread.ofVirtual().name("memory-server-accept").start(this::acceptLoop);
+    acceptThread = (linuxListener != null ? Thread.ofPlatform() : Thread.ofVirtual())
+        .name("memory-server-accept").start(this::acceptLoop);
   }
 
   public SocketAddress localAddress() {
@@ -228,7 +229,7 @@ public final class MemoryServer implements AutoCloseable {
             LinuxRendezvous.closePeer(descriptor);
             continue;
           }
-          Thread.ofVirtual().name("memfd-negotiate").start(() -> negotiateLinux(descriptor));
+          Thread.ofPlatform().name("memfd-negotiate").start(() -> negotiateLinux(descriptor));
         } else {
           RdmaTransport transport = rdmaListener.accept();
           register(new MemoryConnection(transport, null, false));
