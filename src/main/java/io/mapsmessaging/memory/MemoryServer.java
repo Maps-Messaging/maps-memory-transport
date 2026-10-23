@@ -22,6 +22,8 @@ import java.net.UnixDomainSocketAddress;
 import java.nio.file.Files;
 import java.util.Set;
 import java.util.UUID;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -32,6 +34,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** A listener supporting multiple independent incoming transport connections. */
 public final class MemoryServer implements AutoCloseable {
 
+  private static final Logger LOGGER = Logger.getLogger(MemoryServer.class.getName());
   private static final int HANDSHAKE_TIMEOUT_MILLIS = 5_000;
   private static final int DEFAULT_BACKLOG = 64;
 
@@ -232,6 +235,9 @@ public final class MemoryServer implements AutoCloseable {
         }
       } catch (IOException exception) {
         if (!closed.get()) {
+          if (linuxListener != null) {
+            LOGGER.log(Level.WARNING, "Linux shared-memory listener failed to accept a connection", exception);
+          }
           Thread.yield();
         }
       }
@@ -309,7 +315,7 @@ public final class MemoryServer implements AutoCloseable {
       }
       register(new MemoryConnection(transport, null, false));
     } catch (IOException | RuntimeException exception) {
-      // completeAccept retains ownership until it releases a failed native socket.
+      LOGGER.log(Level.WARNING, "Linux shared-memory peer negotiation failed", exception);
     } finally {
       linuxNegotiating.remove(descriptor);
       if (negotiationSlots != null) {
