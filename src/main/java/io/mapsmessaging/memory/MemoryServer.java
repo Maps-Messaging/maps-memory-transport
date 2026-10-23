@@ -315,7 +315,12 @@ public final class MemoryServer implements AutoCloseable {
           if (linuxListener != null || macListener != null || windowsListener != null) {
             LOGGER.log(Level.WARNING, "Native shared-memory listener failed to accept a connection", exception);
           }
-          Thread.yield();
+          try {
+            Thread.sleep(200);
+          } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return;
+          }
         }
       }
     }

@@ -45,7 +45,7 @@ final class WindowsNative {
 
   private static final MethodHandle CREATE_PIPE = kernel("CreateNamedPipeW", ValueLayout.ADDRESS,
       ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT,
-      ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS);
+      ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.ADDRESS);
   private static final MethodHandle CONNECT_PIPE = kernel("ConnectNamedPipe", ValueLayout.JAVA_INT,
       ValueLayout.ADDRESS, ValueLayout.ADDRESS);
   private static final MethodHandle DISCONNECT_PIPE = kernel("DisconnectNamedPipe", ValueLayout.JAVA_INT,
