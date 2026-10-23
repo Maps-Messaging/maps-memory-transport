@@ -306,3 +306,22 @@ and remain part of the subsequent security phase.
 The new native provider addresses select secure local rendezvous explicitly.
 They do not fall back to legacy file-backed mappings if native support is
 missing or peer verification fails.
+
+## Phase 4: authenticated cryptographic protocol (foundation)
+
+The `SecureHandshake` and `SecureSession` APIs provide a standalone
+mutually authenticated X25519/Ed25519 cryptographic protocol with:
+- Signed ephemeral key offers verified against `PeerTrust`
+- Transcript-bound HKDF-SHA256 session secrets and separate directional keys
+- Explicit session-key confirmation required before record processing
+- AES-256-GCM, ChaCha20-Poly1305, or HMAC-SHA-256 authenticated records
+- Sequence-based replay rejection, bounded record length and key cleanup
+- Tamper, trust, mismatch and replay regression tests
+
+**Important:** This cryptographic foundation is not yet integrated with
+platform rendezvous. The configured connection API continues to reject
+non-null `MemorySecurity` rather than silently connecting without negotiated
+protection. Platform handshake wiring and encrypted shared-memory record
+framing must be completed before Phase 4 may be declared functional.
+
+Run: `mvn test -Dtest=SecureHandshakeTest`
