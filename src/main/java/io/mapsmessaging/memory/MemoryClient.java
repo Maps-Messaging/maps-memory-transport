@@ -9,6 +9,8 @@ package io.mapsmessaging.memory;
 import io.mapsmessaging.memory.rdma.RdmaTransport;
 import io.mapsmessaging.memory.shm.SharedMemoryTransport;
 import io.mapsmessaging.memory.shm.linux.LinuxRendezvous;
+import io.mapsmessaging.memory.shm.macos.MacRendezvous;
+import io.mapsmessaging.memory.shm.windows.WindowsRendezvous;
 import java.net.UnixDomainSocketAddress;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -38,7 +40,16 @@ public final class MemoryClient {
       return connectRdma(address);
     }
     if (config.address() instanceof UnixDomainSocketAddress unixAddress) {
-      return new MemoryConnection(LinuxRendezvous.connect(unixAddress, config.connectTimeoutMillis()), null, false);
+      if (System.getProperty("os.name", "").equalsIgnoreCase("Mac OS X")) {
+        return new MemoryConnection(MacRendezvous.connect(unixAddress, config.connectTimeoutMillis()), null, false);
+      }
+      if (System.getProperty("os.name", "").equalsIgnoreCase("Linux")) {
+        return new MemoryConnection(LinuxRendezvous.connect(unixAddress, config.connectTimeoutMillis()), null, false);
+      }
+      throw new IOException("Unix-domain shared-memory transport is unavailable on this platform");
+    }
+    if (config.address() instanceof WindowsPipeAddress windowsAddress) {
+      return new MemoryConnection(WindowsRendezvous.connect(windowsAddress, config.connectTimeoutMillis()), null, false);
     }
     if (!(config.address() instanceof InetSocketAddress address)) {
       throw new IllegalArgumentException("Unsupported shared-memory address type");

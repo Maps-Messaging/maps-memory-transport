@@ -11,6 +11,11 @@ import io.mapsmessaging.memory.rdma.RdmaTransport;
 import io.mapsmessaging.memory.shm.SharedMemoryTransport;
 import io.mapsmessaging.memory.shm.linux.LinuxRendezvous;
 import io.mapsmessaging.memory.shm.linux.LinuxMemoryTransport;
+import io.mapsmessaging.memory.shm.macos.MacMemoryTransport;
+import io.mapsmessaging.memory.shm.macos.MacRendezvous;
+import io.mapsmessaging.memory.shm.windows.WindowsMemoryTransport;
+import io.mapsmessaging.memory.shm.windows.WindowsRendezvous;
+import java.lang.foreign.MemorySegment;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -41,7 +46,11 @@ public final class MemoryServer implements AutoCloseable {
   private final ServerSocket localListener;
   private final RdmaListener rdmaListener;
   private final LinuxRendezvous linuxListener;
+  private final MacRendezvous macListener;
+  private final WindowsRendezvous windowsListener;
   private final Set<Integer> linuxNegotiating = ConcurrentHashMap.newKeySet();
+  private final Set<Integer> macNegotiating = ConcurrentHashMap.newKeySet();
+  private final Set<MemorySegment> windowsNegotiating = ConcurrentHashMap.newKeySet();
   private final int slotSize;
   private final int slotCount;
   private final BlockingQueue<MemoryConnection> pending = new LinkedBlockingQueue<>();
@@ -84,8 +93,18 @@ public final class MemoryServer implements AutoCloseable {
     }
     if (config.transport() == MemoryTransportType.SHARED_MEMORY) {
       if (config.address() instanceof UnixDomainSocketAddress unixAddress) {
-        return new MemoryServer(LinuxRendezvous.listen(unixAddress,
-            config.slotSize(), config.slotCount(), DEFAULT_BACKLOG), config);
+        if (System.getProperty("os.name", "").equalsIgnoreCase("Mac OS X")) {
+          return new MemoryServer(MacRendezvous.listen(unixAddress,
+              config.slotSize(), config.slotCount(), DEFAULT_BACKLOG), config);
+        }
+        if (System.getProperty("os.name", "").equalsIgnoreCase("Linux")) {
+          return new MemoryServer(LinuxRendezvous.listen(unixAddress,
+              config.slotSize(), config.slotCount(), DEFAULT_BACKLOG), config);
+        }
+        throw new IOException("Unix domain shared-memory transport is unavailable on this platform");
+      }
+      if (config.address() instanceof WindowsPipeAddress windowsAddress) {
+        return new MemoryServer(WindowsRendezvous.listen(windowsAddress), config);
       }
       if (!(config.address() instanceof InetSocketAddress address)) {
         throw new IllegalArgumentException("Unsupported shared-memory address type");
@@ -106,31 +125,49 @@ public final class MemoryServer implements AutoCloseable {
   }
 
   private MemoryServer(LinuxRendezvous linuxListener, MemoryEndpointConfig config) {
-    this(null, null, linuxListener, config.slotSize(), config.slotCount(), config);
+    this(null, null, linuxListener, null, null, config.slotSize(), config.slotCount(), config);
+  }
+
+  private MemoryServer(MacRendezvous macListener, MemoryEndpointConfig config) {
+    this(null, null, null, macListener, null, config.slotSize(), config.slotCount(), config);
+  }
+
+  private MemoryServer(WindowsRendezvous windowsListener, MemoryEndpointConfig config) {
+    this(null, null, null, null, windowsListener, config.slotSize(), config.slotCount(), config);
   }
 
   private MemoryServer(ServerSocket localListener, RdmaListener rdmaListener, int slotSize, int slotCount, MemoryEndpointConfig config) {
-    this(localListener, rdmaListener, null, slotSize, slotCount, config);
+    this(localListener, rdmaListener, null, null, null, slotSize, slotCount, config);
   }
 
   private MemoryServer(ServerSocket localListener, RdmaListener rdmaListener,
-      LinuxRendezvous linuxListener, int slotSize, int slotCount, MemoryEndpointConfig config) {
+      LinuxRendezvous linuxListener, MacRendezvous macListener, WindowsRendezvous windowsListener,
+      int slotSize, int slotCount, MemoryEndpointConfig config) {
     this.localListener = localListener;
     this.rdmaListener = rdmaListener;
     this.linuxListener = linuxListener;
+    this.macListener = macListener;
+    this.windowsListener = windowsListener;
     this.slotSize = slotSize;
     this.slotCount = slotCount;
     maxConnections = config == null ? 0 : config.maxConnections();
     maxPendingConnections = config == null ? 0 : config.maxPendingConnections();
     handshakeTimeoutMillis = config == null ? HANDSHAKE_TIMEOUT_MILLIS : config.handshakeTimeoutMillis();
     negotiationSlots = config == null || config.maxNegotiations() == 0 ? null : new Semaphore(config.maxNegotiations());
-    acceptThread = (linuxListener != null ? Thread.ofPlatform() : Thread.ofVirtual())
+    boolean nativeListener = linuxListener != null || macListener != null || windowsListener != null;
+    acceptThread = (nativeListener ? Thread.ofPlatform() : Thread.ofVirtual())
         .name("memory-server-accept").start(this::acceptLoop);
   }
 
   public SocketAddress localAddress() {
     if (linuxListener != null) {
       return linuxListener.localAddress();
+    }
+    if (macListener != null) {
+      return macListener.localAddress();
+    }
+    if (windowsListener != null) {
+      return windowsListener.localAddress();
     }
     return localListener != null ? localListener.getLocalSocketAddress() : rdmaListener.localAddress();
   }
@@ -173,6 +210,10 @@ public final class MemoryServer implements AutoCloseable {
         localListener.close();
       } else if (linuxListener != null) {
         linuxListener.close();
+      } else if (macListener != null) {
+        macListener.close();
+      } else if (windowsListener != null) {
+        windowsListener.close();
       } else {
         rdmaListener.close();
       }
@@ -182,6 +223,12 @@ public final class MemoryServer implements AutoCloseable {
     synchronized (lifecycleLock) {
       for (int descriptor : linuxNegotiating) {
         LinuxRendezvous.shutdownPeer(descriptor);
+      }
+      for (int descriptor : macNegotiating) {
+        MacRendezvous.shutdownPeer(descriptor);
+      }
+      for (MemorySegment pipe : windowsNegotiating) {
+        WindowsRendezvous.shutdownPeer(pipe);
       }
     }
     for (Socket socket : negotiating) {
@@ -230,14 +277,28 @@ public final class MemoryServer implements AutoCloseable {
             continue;
           }
           Thread.ofPlatform().name("memfd-negotiate").start(() -> negotiateLinux(descriptor));
+        } else if (macListener != null) {
+          int descriptor = macListener.acceptDescriptor();
+          if (!reserveMacNegotiation(descriptor)) {
+            MacRendezvous.closePeer(descriptor);
+            continue;
+          }
+          Thread.ofPlatform().name("macos-shm-negotiate").start(() -> negotiateMac(descriptor));
+        } else if (windowsListener != null) {
+          MemorySegment pipe = windowsListener.acceptHandle();
+          if (!reserveWindowsNegotiation(pipe)) {
+            WindowsRendezvous.closePeer(pipe);
+            continue;
+          }
+          Thread.ofPlatform().name("windows-shm-negotiate").start(() -> negotiateWindows(pipe));
         } else {
           RdmaTransport transport = rdmaListener.accept();
           register(new MemoryConnection(transport, null, false));
         }
       } catch (IOException exception) {
         if (!closed.get()) {
-          if (linuxListener != null) {
-            LOGGER.log(Level.WARNING, "Linux shared-memory listener failed to accept a connection", exception);
+          if (linuxListener != null || macListener != null || windowsListener != null) {
+            LOGGER.log(Level.WARNING, "Native shared-memory listener failed to accept a connection", exception);
           }
           Thread.yield();
         }
@@ -292,6 +353,38 @@ public final class MemoryServer implements AutoCloseable {
     }
   }
 
+  private boolean reserveMacNegotiation(int descriptor) {
+    if (negotiationSlots != null && !negotiationSlots.tryAcquire()) {
+      return false;
+    }
+    synchronized (lifecycleLock) {
+      if (closed.get() || capacityExceeded()) {
+        if (negotiationSlots != null) {
+          negotiationSlots.release();
+        }
+        return false;
+      }
+      macNegotiating.add(descriptor);
+      return true;
+    }
+  }
+
+  private boolean reserveWindowsNegotiation(MemorySegment pipe) {
+    if (negotiationSlots != null && !negotiationSlots.tryAcquire()) {
+      return false;
+    }
+    synchronized (lifecycleLock) {
+      if (closed.get() || capacityExceeded()) {
+        if (negotiationSlots != null) {
+          negotiationSlots.release();
+        }
+        return false;
+      }
+      windowsNegotiating.add(pipe);
+      return true;
+    }
+  }
+
   private boolean reserveLinuxNegotiation(int descriptor) {
     if (negotiationSlots != null && !negotiationSlots.tryAcquire()) {
       return false;
@@ -325,6 +418,41 @@ public final class MemoryServer implements AutoCloseable {
     }
   }
 
+  private void negotiateMac(int descriptor) {
+    try {
+      MacMemoryTransport transport = macListener.completeAccept(descriptor, handshakeTimeoutMillis);
+      synchronized (lifecycleLock) {
+        macNegotiating.remove(descriptor);
+      }
+      register(new MemoryConnection(transport, null, false));
+    } catch (IOException | RuntimeException exception) {
+      LOGGER.log(Level.WARNING, "macOS shared-memory peer negotiation failed", exception);
+    } finally {
+      macNegotiating.remove(descriptor);
+      if (negotiationSlots != null) {
+        negotiationSlots.release();
+      }
+    }
+  }
+
+  private void negotiateWindows(MemorySegment pipe) {
+    try {
+      WindowsMemoryTransport transport = windowsListener.completeAccept(pipe,
+          slotSize, slotCount, handshakeTimeoutMillis);
+      synchronized (lifecycleLock) {
+        windowsNegotiating.remove(pipe);
+      }
+      register(new MemoryConnection(transport, null, false));
+    } catch (IOException | RuntimeException exception) {
+      LOGGER.log(Level.WARNING, "Windows shared-memory peer negotiation failed", exception);
+    } finally {
+      windowsNegotiating.remove(pipe);
+      if (negotiationSlots != null) {
+        negotiationSlots.release();
+      }
+    }
+  }
+
   private boolean reserveNegotiation(Socket socket) {
     if (negotiationSlots != null && !negotiationSlots.tryAcquire()) {
       return false;
@@ -342,7 +470,8 @@ public final class MemoryServer implements AutoCloseable {
   }
 
   private boolean capacityExceeded() {
-    return (maxConnections > 0 && connections.size() + negotiating.size() + linuxNegotiating.size() >= maxConnections)
+    return (maxConnections > 0 && connections.size() + negotiating.size()
+        + linuxNegotiating.size() + macNegotiating.size() + windowsNegotiating.size() >= maxConnections)
         || (maxPendingConnections > 0 && pending.size() >= maxPendingConnections);
   }
 

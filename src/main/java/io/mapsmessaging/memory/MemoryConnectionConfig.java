@@ -30,6 +30,10 @@ public record MemoryConnectionConfig(MemoryTransportType transport, SocketAddres
     return new MemoryConnectionConfig(MemoryTransportType.SHARED_MEMORY, address, 5_000, null);
   }
 
+  public static MemoryConnectionConfig windowsSharedMemory(WindowsPipeAddress address) {
+    return new MemoryConnectionConfig(MemoryTransportType.SHARED_MEMORY, address, 5_000, null);
+  }
+
   public static MemoryConnectionConfig rdma(InetSocketAddress address) {
     return new MemoryConnectionConfig(MemoryTransportType.RDMA, address, 5_000, null);
   }

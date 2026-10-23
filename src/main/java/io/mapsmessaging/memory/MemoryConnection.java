@@ -7,7 +7,6 @@
 package io.mapsmessaging.memory;
 
 import io.mapsmessaging.memory.shm.SharedMemoryTransport;
-import io.mapsmessaging.memory.shm.linux.LinuxMemoryTransport;
 import java.io.IOException;
 import java.net.Socket;
 import java.nio.ByteBuffer;
@@ -35,8 +34,8 @@ public final class MemoryConnection implements MemoryTransport {
     keepaliveThread = transport instanceof SharedMemoryTransport
         ? Thread.ofVirtual().name("memory-peer-keepalive").start(this::monitorSharedMemory)
         : null;
-    if (transport instanceof LinuxMemoryTransport linuxTransport) {
-      linuxTransport.onClose(() -> {
+    if (transport instanceof ConnectionCloseNotifier notifier) {
+      notifier.onClose(() -> {
         try {
           close();
         } catch (IOException ignored) {

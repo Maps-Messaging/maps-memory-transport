@@ -218,3 +218,91 @@ mvn test -Dtest=LinuxMemfdEndpointTest
 Windows and macOS skip Linux-native integration tests. The Linux backend does
 not yet implement optional Ed25519 authentication or cryptographic record
 protection. Those remain a separate security phase.
+
+## Windows and macOS managed shared-memory providers
+
+Managed connections select a native shared-memory provider from the explicit
+local address type. Existing legacy `InetSocketAddress` file-backed endpoints
+retain their previous behaviour for compatibility.
+
+### Windows
+
+Use a `WindowsPipeAddress` to establish connections through a restricted local
+named pipe. The implementation checks the OS account SID of each peer, creates
+two unnamed memory-mapping objects and duplicates mapping handles directly into
+the authorised client process. The client never opens mappings by shared name.
+
+```java
+WindowsPipeAddress address = WindowsPipeAddress.of("mqtt-local");
+try (MemoryServer server = MemoryServer.listen(
+    MemoryEndpointConfig.builder().address(address).build())) {
+  try (MemoryConnection client =
+           MemoryClient.connect(MemoryConnectionConfig.windowsSharedMemory(address));
+       MemoryConnection accepted = server.accept()) {
+    client.write(source);
+    accepted.read(destination);
+  }
+}
+```
+
+Windows security relies on native token verification and a restricted named-pipe
+security descriptor; the library requires the client and listener processes to
+run as the same Windows account. The pipe explicitly rejects remote clients.
+The anonymous mappings are owned by the connected peers and the OS reclaims
+them when all mapping views and handles close, including following process exit.
+Same-account processes and administrators remain within the platform trust boundary.
+
+### macOS
+
+Use an `UnixDomainSocketAddress`. The backend uses `getpeereid`, separate POSIX
+shared-memory objects for each transfer direction and `SCM_RIGHTS` descriptor
+passing. Each shared-memory object is unlinked immediately after creation,
+preventing later attachment by a pathname.
+
+```java
+UnixDomainSocketAddress address =
+    UnixDomainSocketAddress.of(Path.of("/tmp/maps-private/transport.sock"));
+
+try (MemoryServer server = MemoryServer.listen(
+    MemoryEndpointConfig.builder().address(address).build())) {
+  try (MemoryConnection client = MemoryClient.connect(
+           new MemoryConnectionConfig(MemoryTransportType.SHARED_MEMORY,
+               address, 5_000, null));
+       MemoryConnection accepted = server.accept()) {
+    client.write(source);
+    accepted.read(destination);
+  }
+}
+```
+
+Create the parent control-socket directory with owner-only traversal rights
+before binding. The UID reported by the operating system must match the local
+effective UID. Shared-memory descriptors and mappings are per connection.
+
+### Platform testing
+
+On Windows:
+
+```text
+mvn clean test -Dtest=NativePlatformEndpointTest
+```
+
+On macOS:
+
+```text
+mvn clean test -Dtest=NativePlatformEndpointTest
+```
+
+The test suite exercises four simultaneous clients, bidirectional exchange,
+a second JVM, forced peer termination, and applicable access checks. Other
+platform-specific tests skip cleanly. The Maven Surefire configuration enables
+FFM native access for JDK 25; child JVMs enable it explicitly.
+
+Windows and macOS implementations use the same `MemoryConnection` lifecycle
+notification interface as Linux. Optional X25519/Ed25519 authentication and
+cryptographic record protection are separate from mandatory local OS admission
+and remain part of the subsequent security phase.
+
+The new native provider addresses select secure local rendezvous explicitly.
+They do not fall back to legacy file-backed mappings if native support is
+missing or peer verification fails.

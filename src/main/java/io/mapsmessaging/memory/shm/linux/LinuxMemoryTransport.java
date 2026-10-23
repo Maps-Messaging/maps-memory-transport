@@ -6,6 +6,7 @@
 package io.mapsmessaging.memory.shm.linux;
 
 import io.mapsmessaging.memory.MemoryTransport;
+import io.mapsmessaging.memory.ConnectionCloseNotifier;
 import io.mapsmessaging.memory.internal.MemoryRing;
 import java.io.IOException;
 import java.lang.foreign.Arena;
@@ -19,7 +20,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * private Unix control socket. File descriptors, mappings and socket are owned
  * solely by this connection after successful attachment.
  */
-public final class LinuxMemoryTransport implements MemoryTransport {
+public final class LinuxMemoryTransport implements MemoryTransport, ConnectionCloseNotifier {
 
   private static final int HEADER_SIZE = 64;
   private static final long HEARTBEAT_INTERVAL_MILLIS = 1_000;
