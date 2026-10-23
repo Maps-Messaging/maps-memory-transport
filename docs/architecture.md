@@ -4,7 +4,8 @@ Maps Memory Transport is a Java 25 library offering a common **byte-stream conne
 over local shared memory or Linux RDMA. It is independent of the MapsMessaging server and
 does not implement MQTT, sessions, destinations, routing or application-level messaging.
 
-See [Connection examples](connections.md) for complete client and server programs.
+See [Connection examples](connections.md) for complete client and server programs,
+and [Docker and host processes](docker-and-host.md) for container IPC deployment.
 
 ## Main abstractions
 

@@ -9,6 +9,8 @@ High-performance shared-memory and RDMA transports for Java.
   Docker and RDMA.
 - **[Connection examples](docs/connections.md)**: runnable simple and secure
   Linux/macOS/Windows programs, partial-I/O handling and managed RDMA usage.
+- **[Docker and host processes](docs/docker-and-host.md)**: host/container and
+  container/container IPC, bind mounts, UID mapping, Compose examples and security.
 
 These are the current API guides. Historical phase notes below document the
 implementation's evolution and may describe earlier restrictions that have
