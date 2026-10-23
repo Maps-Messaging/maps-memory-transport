@@ -2,6 +2,18 @@
 
 High-performance shared-memory and RDMA transports for Java.
 
+## Documentation
+
+- **[How the transport works](docs/architecture.md)**: endpoints, platform
+  backends, shared-memory ring layout, authenticated negotiation, lifecycle,
+  Docker and RDMA.
+- **[Connection examples](docs/connections.md)**: runnable simple and secure
+  Linux/macOS/Windows programs, partial-I/O handling and managed RDMA usage.
+
+These are the current API guides. Historical phase notes below document the
+implementation's evolution and may describe earlier restrictions that have
+since been replaced.
+
 ## Scope
 
 This library provides transport primitives only. It has no dependency on the MapsMessaging server, MAPS protocol, sessions, destinations, selectors, routing or clustering.
