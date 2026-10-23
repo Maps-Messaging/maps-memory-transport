@@ -153,7 +153,7 @@ public final class WindowsRendezvous implements AutoCloseable {
 
   public static WindowsMemoryTransport connect(WindowsPipeAddress address, int timeoutMillis)
       throws IOException {
-    if (!WindowsNative.supported()) {
+    if (!windowsSupported()) {
       throw new IOException("Windows native shared memory requires Windows x64 or ARM64");
     }
     long deadline = System.nanoTime() + (long) timeoutMillis * 1_000_000L;

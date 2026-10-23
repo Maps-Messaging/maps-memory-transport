@@ -50,8 +50,8 @@ final class MacNative {
 
   private static final MethodHandle FCNTL = nativeVariadicMethod("fcntl", ValueLayout.JAVA_INT,
       ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT);
-  private static final MethodHandle FSTAT = nativeMethod("fstat", ValueLayout.JAVA_INT,
-      ValueLayout.JAVA_INT, ValueLayout.ADDRESS);
+  private static final MethodHandle LSEEK = nativeMethod("lseek", ValueLayout.JAVA_LONG,
+      ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT);
   private static final MethodHandle SHM_OPEN = nativeMethod("shm_open", ValueLayout.JAVA_INT,
       ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT);
   private static final MethodHandle SHM_UNLINK = nativeMethod("shm_unlink", ValueLayout.JAVA_INT, ValueLayout.ADDRESS);
@@ -279,14 +279,13 @@ final class MacNative {
     if (size <= 0 || size > 256L * 1024 * 1024) {
       throw new IOException("Invalid mapped region size");
     }
-    try (Arena arena = Arena.ofConfined()) {
-      MemorySegment stat = arena.allocate(144, 8);
-      if (integer(FSTAT, descriptor, stat) != 0) {
-        throw failure("fstat");
-      }
-      if (stat.get(ValueLayout.JAVA_LONG, 96) != size) {
-        throw new IOException("Received macOS shared-memory region has an unexpected size");
-      }
+    long actualSize = longValue(LSEEK, descriptor, 0L, 2);
+    if (actualSize < 0) {
+      throw failure("lseek(SEEK_END)");
+    }
+    if (actualSize != size) {
+      throw new IOException("Received macOS shared-memory region has an unexpected size: expected="
+          + size + ", actual=" + actualSize);
     }
   }
 
