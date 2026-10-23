@@ -50,8 +50,8 @@ final class MacNative {
 
   private static final MethodHandle FCNTL = nativeVariadicMethod("fcntl", ValueLayout.JAVA_INT,
       ValueLayout.JAVA_INT, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT);
-  private static final MethodHandle LSEEK = nativeMethod("lseek", ValueLayout.JAVA_LONG,
-      ValueLayout.JAVA_INT, ValueLayout.JAVA_LONG, ValueLayout.JAVA_INT);
+  private static final MethodHandle FSTAT = nativeMethod("fstat", ValueLayout.JAVA_INT,
+      ValueLayout.JAVA_INT, ValueLayout.ADDRESS);
   private static final MethodHandle SHM_OPEN = nativeMethod("shm_open", ValueLayout.JAVA_INT,
       ValueLayout.ADDRESS, ValueLayout.JAVA_INT, ValueLayout.JAVA_INT);
   private static final MethodHandle SHM_UNLINK = nativeMethod("shm_unlink", ValueLayout.JAVA_INT, ValueLayout.ADDRESS);
@@ -279,9 +279,15 @@ final class MacNative {
     if (size <= 0 || size > 256L * 1024 * 1024) {
       throw new IOException("Invalid mapped region size");
     }
-    long actualSize = longValue(LSEEK, descriptor, 0L, 2);
-    if (actualSize < 0) {
-      throw failure("lseek(SEEK_END)");
+    long actualSize;
+    try (Arena arena = Arena.ofConfined()) {
+      // Darwin LP64 stat64: st_size is at byte offset 96.
+      MemorySegment stat = arena.allocate(144, 8);
+      stat.fill((byte) 0);
+      if (integer(FSTAT, descriptor, stat) != 0) {
+        throw failure("fstat");
+      }
+      actualSize = stat.get(ValueLayout.JAVA_LONG, 96);
     }
     if (actualSize != size) {
       throw new IOException("Received macOS shared-memory region has an unexpected size: expected="
@@ -302,13 +308,13 @@ final class MacNative {
       MemorySegment iovec = arena.allocate(16, 8);
       iovec.set(ValueLayout.ADDRESS, 0, payload);
       iovec.set(ValueLayout.JAVA_LONG, 8, 1L);
-      MemorySegment control = arena.allocate(24, 8);
+      MemorySegment control = arena.allocate(20, 4);
       control.fill((byte) 0);
-      control.set(ValueLayout.JAVA_INT, 0, 24);
+      control.set(ValueLayout.JAVA_INT, 0, 20);
       control.set(ValueLayout.JAVA_INT, 4, SOL_SOCKET);
       control.set(ValueLayout.JAVA_INT, 8, SCM_RIGHTS);
-      control.set(ValueLayout.JAVA_INT, 16, first);
-      control.set(ValueLayout.JAVA_INT, 20, second);
+      control.set(ValueLayout.JAVA_INT, 12, first);
+      control.set(ValueLayout.JAVA_INT, 16, second);
       MemorySegment header = messageHeader(arena, iovec, control);
       if (longValue(SENDMSG, socket, header, 0) != 1) {
         throw failure("sendmsg(SCM_RIGHTS)");
@@ -332,18 +338,18 @@ final class MacNative {
       long controlLength = Integer.toUnsignedLong(control.get(ValueLayout.JAVA_INT, 0));
       boolean rights = control.get(ValueLayout.JAVA_INT, 4) == SOL_SOCKET
           && control.get(ValueLayout.JAVA_INT, 8) == SCM_RIGHTS;
-      int descriptorCount = rights && controlLength >= 16 && controlLength <= control.byteSize()
-          ? (int) ((controlLength - 16) / Integer.BYTES) : 0;
-      int first = descriptorCount >= 1 ? control.get(ValueLayout.JAVA_INT, 16) : -1;
-      int second = descriptorCount >= 2 ? control.get(ValueLayout.JAVA_INT, 20) : -1;
-      boolean valid = Integer.toUnsignedLong(header.get(ValueLayout.JAVA_INT, 40)) == 24
-          && controlLength == 24 && descriptorCount == 2
+      int descriptorCount = rights && controlLength >= 12 && controlLength <= control.byteSize()
+          ? (int) ((controlLength - 12) / Integer.BYTES) : 0;
+      int first = descriptorCount >= 1 ? control.get(ValueLayout.JAVA_INT, 12) : -1;
+      int second = descriptorCount >= 2 ? control.get(ValueLayout.JAVA_INT, 16) : -1;
+      boolean valid = Integer.toUnsignedLong(header.get(ValueLayout.JAVA_INT, 40)) == 20
+          && controlLength == 20 && descriptorCount == 2
           && first >= 0 && second >= 0
           && payload.get(ValueLayout.JAVA_BYTE, 0) == 1
           && (header.get(ValueLayout.JAVA_INT, 44) & MSG_CTRUNC) == 0;
       if (!valid) {
         for (int index = 0; index < descriptorCount; index++) {
-          int received = control.get(ValueLayout.JAVA_INT, 16 + (long) index * Integer.BYTES);
+          int received = control.get(ValueLayout.JAVA_INT, 12 + (long) index * Integer.BYTES);
           if (received >= 0) {
             close(received);
           }
