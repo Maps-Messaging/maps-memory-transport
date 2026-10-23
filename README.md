@@ -130,3 +130,39 @@ I/O readiness and read/write operations. It does not provide a separate applicat
 heartbeat or an RDMA handshake timeout. Unclean termination of the process that
 owns a shared-memory region can leave an orphaned mapped file, which is not yet
 garbage-collected automatically.
+
+## Managed endpoint configuration (Phase 1)
+
+The configured entry points add explicit connection and negotiation limits while leaving
+the existing convenience methods and their defaults unchanged:
+
+```java
+MemoryEndpointConfig config = MemoryEndpointConfig.builder()
+    .transport(MemoryTransportType.SHARED_MEMORY)
+    .address(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0))
+    .maxConnections(64)
+    .maxPendingConnections(64)
+    .maxNegotiations(16)
+    .handshakeTimeoutMillis(5_000)
+    .build();
+
+try (MemoryServer server = MemoryServer.listen(config)) {
+  InetSocketAddress address = (InetSocketAddress) server.localAddress();
+  try (MemoryConnection outgoing = MemoryClient.connect(MemoryConnectionConfig.sharedMemory(address));
+       MemoryConnection incoming = server.accept()) {
+    outgoing.write(source);
+    incoming.read(destination);
+  }
+}
+```
+
+Connection and negotiation limits of zero mean unlimited, for callers explicitly opting
+out of bounded behaviour. The configured defaults are 64 active peers, 64 pending
+accepts, and 16 simultaneous local negotiations. The legacy factories preserve their
+original behaviour.
+
+The provider interface is package-private. Linux memfd, Windows and macOS native
+providers are not part of this phase. Passing a non-null `MemorySecurity` currently
+fails explicitly: cryptographic handshake and native security are not yet implemented.
+The existing managed local rendezvous remains loopback TCP and mapped files until the
+secure platform-provider stages. Do not use it across an untrusted process boundary.

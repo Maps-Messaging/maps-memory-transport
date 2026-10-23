@@ -21,12 +21,30 @@ public final class MemoryClient {
 
   private MemoryClient() {}
 
+  public static MemoryConnection connect(MemoryConnectionConfig config) throws IOException {
+    return MemoryProviders.provider(config.transport()).connect(config);
+  }
+
+  static MemoryConnection connectConfigured(MemoryConnectionConfig config) throws IOException {
+    if (config.security() != null) {
+      throw new IOException("Authenticated transport is not yet implemented");
+    }
+    if (config.transport() == MemoryTransportType.RDMA) {
+      return connectRdma(config.address());
+    }
+    return connectSharedMemory(config.address(), config.connectTimeoutMillis());
+  }
+
   public static MemoryConnection connectSharedMemory(InetSocketAddress address) throws IOException {
+    return connectSharedMemory(address, CONNECT_TIMEOUT_MILLIS);
+  }
+
+  private static MemoryConnection connectSharedMemory(InetSocketAddress address, int timeoutMillis) throws IOException {
     MemoryServer.requireLoopback(address);
     Socket controlSocket = new Socket();
     try {
-      controlSocket.connect(address, CONNECT_TIMEOUT_MILLIS);
-      controlSocket.setSoTimeout(CONNECT_TIMEOUT_MILLIS);
+      controlSocket.connect(address, timeoutMillis);
+      controlSocket.setSoTimeout(timeoutMillis);
       DataInputStream input = new DataInputStream(controlSocket.getInputStream());
       DataOutputStream output = new DataOutputStream(controlSocket.getOutputStream());
       String regionName = input.readUTF();

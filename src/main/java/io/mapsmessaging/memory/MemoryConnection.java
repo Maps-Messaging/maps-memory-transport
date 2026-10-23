@@ -25,6 +25,7 @@ public final class MemoryConnection implements MemoryTransport {
   private final AtomicBoolean closed = new AtomicBoolean();
   private final Thread keepaliveThread;
   private volatile Runnable onClose;
+  private volatile MemoryConnectionState state = MemoryConnectionState.ACTIVE;
 
   MemoryConnection(MemoryTransport transport, Socket controlSocket, boolean regionOwner) {
     this.transport = transport;
@@ -66,6 +67,10 @@ public final class MemoryConnection implements MemoryTransport {
     return closed.get();
   }
 
+  public MemoryConnectionState state() {
+    return state;
+  }
+
   void onClose(Runnable listener) {
     onClose = listener;
     if (closed.get()) {
@@ -78,6 +83,7 @@ public final class MemoryConnection implements MemoryTransport {
     if (!closed.compareAndSet(false, true)) {
       return;
     }
+    state = MemoryConnectionState.CLOSING;
     if (keepaliveThread != null) {
       keepaliveThread.interrupt();
     }
@@ -113,6 +119,7 @@ public final class MemoryConnection implements MemoryTransport {
     if (listener != null) {
       listener.run();
     }
+    state = failure == null ? MemoryConnectionState.CLOSED : MemoryConnectionState.FAILED;
     if (failure != null) {
       throw failure;
     }

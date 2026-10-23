@@ -23,6 +23,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** A listener supporting multiple independent incoming transport connections. */
@@ -40,6 +41,12 @@ public final class MemoryServer implements AutoCloseable {
   private final Set<Socket> negotiating = ConcurrentHashMap.newKeySet();
   private final AtomicBoolean closed = new AtomicBoolean();
   private final Thread acceptThread;
+  private final Semaphore negotiationSlots;
+  private final int maxConnections;
+  private final int maxPendingConnections;
+  private final int handshakeTimeoutMillis;
+  private final Object lifecycleLock = new Object();
+  private volatile MemoryServerState state = MemoryServerState.ACTIVE;
 
   public static MemoryServer listenSharedMemory(InetSocketAddress address) throws IOException {
     return listenSharedMemory(address, SharedMemoryTransport.DEFAULT_SLOT_SIZE, SharedMemoryTransport.DEFAULT_SLOT_COUNT);
@@ -59,11 +66,36 @@ public final class MemoryServer implements AutoCloseable {
     return new MemoryServer(null, RdmaListener.bind(address), 0, 0);
   }
 
+  public static MemoryServer listen(MemoryEndpointConfig config) throws IOException {
+    return MemoryProviders.provider(config.transport()).listen(config);
+  }
+
+  static MemoryServer listenConfigured(MemoryEndpointConfig config) throws IOException {
+    if (config.security() != null) {
+      throw new IOException("Authenticated transport is not yet implemented");
+    }
+    if (config.transport() == MemoryTransportType.SHARED_MEMORY) {
+      requireLoopback(config.address());
+      ServerSocket listener = new ServerSocket();
+      listener.bind(config.address(), DEFAULT_BACKLOG);
+      return new MemoryServer(listener, null, config.slotSize(), config.slotCount(), config);
+    }
+    return new MemoryServer(null, RdmaListener.bind(config.address()), 0, 0, config);
+  }
+
   private MemoryServer(ServerSocket localListener, RdmaListener rdmaListener, int slotSize, int slotCount) {
+    this(localListener, rdmaListener, slotSize, slotCount, null);
+  }
+
+  private MemoryServer(ServerSocket localListener, RdmaListener rdmaListener, int slotSize, int slotCount, MemoryEndpointConfig config) {
     this.localListener = localListener;
     this.rdmaListener = rdmaListener;
     this.slotSize = slotSize;
     this.slotCount = slotCount;
+    maxConnections = config == null ? 0 : config.maxConnections();
+    maxPendingConnections = config == null ? 0 : config.maxPendingConnections();
+    handshakeTimeoutMillis = config == null ? HANDSHAKE_TIMEOUT_MILLIS : config.handshakeTimeoutMillis();
+    negotiationSlots = config == null || config.maxNegotiations() == 0 ? null : new Semaphore(config.maxNegotiations());
     acceptThread = Thread.ofVirtual().name("memory-server-accept").start(this::acceptLoop);
   }
 
@@ -90,10 +122,17 @@ public final class MemoryServer implements AutoCloseable {
     return closed.get();
   }
 
+  public MemoryServerState state() {
+    return state;
+  }
+
   @Override
   public void close() throws IOException {
-    if (!closed.compareAndSet(false, true)) {
-      return;
+    synchronized (lifecycleLock) {
+      if (!closed.compareAndSet(false, true)) {
+        return;
+      }
+      state = MemoryServerState.CLOSING;
     }
     acceptThread.interrupt();
     IOException failure = null;
@@ -129,6 +168,7 @@ public final class MemoryServer implements AutoCloseable {
       }
     }
     pending.clear();
+    state = failure == null ? MemoryServerState.CLOSED : MemoryServerState.FAILED;
     if (failure != null) {
       throw failure;
     }
@@ -139,7 +179,10 @@ public final class MemoryServer implements AutoCloseable {
       try {
         if (localListener != null) {
           Socket socket = localListener.accept();
-          negotiating.add(socket);
+          if (!reserveNegotiation(socket)) {
+            socket.close();
+            continue;
+          }
           Thread.ofVirtual().name("memory-region-negotiate").start(() -> negotiate(socket));
         } else {
           RdmaTransport transport = rdmaListener.accept();
@@ -155,7 +198,7 @@ public final class MemoryServer implements AutoCloseable {
 
   private void negotiate(Socket socket) {
     try {
-      socket.setSoTimeout(HANDSHAKE_TIMEOUT_MILLIS);
+      socket.setSoTimeout(handshakeTimeoutMillis);
       String regionName = "maps-" + UUID.randomUUID().toString().replace("-", "");
       SharedMemoryTransport transport = new SharedMemoryTransport(regionName, true, slotSize, slotCount);
       boolean transferred = false;
@@ -194,25 +237,56 @@ public final class MemoryServer implements AutoCloseable {
       }
     } finally {
       negotiating.remove(socket);
+      if (negotiationSlots != null) {
+        negotiationSlots.release();
+      }
     }
   }
 
+  private boolean reserveNegotiation(Socket socket) {
+    if (negotiationSlots != null && !negotiationSlots.tryAcquire()) {
+      return false;
+    }
+    synchronized (lifecycleLock) {
+      if (closed.get() || capacityExceeded()) {
+        if (negotiationSlots != null) {
+          negotiationSlots.release();
+        }
+        return false;
+      }
+      negotiating.add(socket);
+      return true;
+    }
+  }
+
+  private boolean capacityExceeded() {
+    return (maxConnections > 0 && connections.size() + negotiating.size() >= maxConnections)
+        || (maxPendingConnections > 0 && pending.size() >= maxPendingConnections);
+  }
+
   private void register(MemoryConnection connection) {
-    if (closed.get()) {
+    boolean accepted;
+    synchronized (lifecycleLock) {
+      accepted = !closed.get()
+          && (maxConnections == 0 || connections.size() < maxConnections)
+          && (maxPendingConnections == 0 || pending.size() < maxPendingConnections);
+      if (accepted) {
+        connections.add(connection);
+        connection.onClose(() -> {
+          connections.remove(connection);
+          pending.remove(connection);
+        });
+        if (!connection.isClosed()) {
+          pending.add(connection);
+        }
+      }
+    }
+    if (!accepted) {
       try {
         connection.close();
       } catch (IOException ignored) {
-        // Shutdown is already in progress.
+        // Connection cannot be published; release its owned resources.
       }
-      return;
-    }
-    connections.add(connection);
-    connection.onClose(() -> {
-      connections.remove(connection);
-      pending.remove(connection);
-    });
-    if (!connection.isClosed()) {
-      pending.add(connection);
     }
   }
 
