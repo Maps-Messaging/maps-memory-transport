@@ -95,3 +95,38 @@ Java 25 is required.
 ## License
 
 Apache License 2.0 with the Commons Clause. See `LICENSE` and `LICENSE-COMMONS-CLAUSE`.
+
+
+## Managed connections
+
+The library also provides a transport-oriented API for accepting multiple independent
+peers without exposing shared-memory filenames, ring side selection, or RDMA handles:
+
+```java
+try (MemoryServer server = MemoryServer.listenSharedMemory(
+    new InetSocketAddress(InetAddress.getLoopbackAddress(), 0))) {
+  InetSocketAddress endpoint = (InetSocketAddress) server.localAddress();
+  try (MemoryConnection client = MemoryClient.connectSharedMemory(endpoint);
+       MemoryConnection accepted = server.accept()) {
+    client.write(source);
+    accepted.read(destination);
+  }
+}
+```
+
+RDMA uses `MemoryServer.listenRdma(address)` and
+`MemoryClient.connectRdma(address)`; both return the same `MemoryConnection`
+type. Each accepted peer has an independent transport.
+
+Local shared-memory setup uses a loopback TCP rendezvous connection to negotiate a
+random region name and the ring layout. A background task refreshes the existing
+mapped-file heartbeat and closes a connection when the other process disappears,
+restarts, or stops refreshing its heartbeat. The server side removes its region file
+when that connection closes. The rendezvous endpoint must be a resolved loopback
+address, and peers must have permission to access the same mapped-file namespace.
+
+The present RDMA implementation detects native transport failure through its normal
+I/O readiness and read/write operations. It does not provide a separate application
+heartbeat or an RDMA handshake timeout. Unclean termination of the process that
+owns a shared-memory region can leave an orphaned mapped file, which is not yet
+garbage-collected automatically.
