@@ -304,7 +304,7 @@ public final class MemoryServer implements AutoCloseable {
           Thread.ofPlatform().name("windows-shm-negotiate").start(() -> negotiateWindows(pipe));
         } else {
           RdmaTransport transport = rdmaListener.accept();
-          if (!reserveRdmaNegotiation()) {
+          if (!reserveRdmaNegotiation(transport)) {
             transport.close();
             continue;
           }
@@ -368,7 +368,7 @@ public final class MemoryServer implements AutoCloseable {
     }
   }
 
-  private boolean reserveRdmaNegotiation() {
+  private boolean reserveRdmaNegotiation(RdmaTransport transport) {
     if (negotiationSlots != null && !negotiationSlots.tryAcquire()) {
       return false;
     }
@@ -380,12 +380,12 @@ public final class MemoryServer implements AutoCloseable {
         return false;
       }
       rdmaNegotiating.incrementAndGet();
+      rdmaNegotiatingTransport.add(transport);
       return true;
     }
   }
 
   private void negotiateRdma(RdmaTransport transport) {
-    rdmaNegotiatingTransport.add(transport);
     boolean counted = true;
     try {
       MemoryTransport secureTransport = RdmaSecure.authenticate(

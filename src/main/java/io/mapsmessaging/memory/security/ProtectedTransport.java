@@ -30,6 +30,7 @@ public final class ProtectedTransport implements MemoryTransport, ConnectionClos
   private ByteBuffer incomingFrame;
   private ByteBuffer readable;
   private ByteBuffer outgoingFrame;
+  private int pendingPlaintextLength;
 
   public ProtectedTransport(MemoryTransport delegate, SecureSession session) {
     this.delegate = Objects.requireNonNull(delegate, "delegate");
@@ -39,8 +40,21 @@ public final class ProtectedTransport implements MemoryTransport, ConnectionClos
   @Override
   public synchronized int write(ByteBuffer source) throws IOException {
     ensureOpen();
-    flushPending();
-    if (outgoingFrame != null || !delegate.canWrite() || !source.hasRemaining()) {
+    if (outgoingFrame != null) {
+      flushPending();
+      if (outgoingFrame != null) {
+        return 0;
+      }
+      if (source.remaining() < pendingPlaintextLength) {
+        fail(new IOException("Source buffer changed during a partial protected write"));
+        throw new IOException("Source buffer changed during a partial protected write");
+      }
+      int accepted = pendingPlaintextLength;
+      source.position(source.position() + accepted);
+      pendingPlaintextLength = 0;
+      return accepted;
+    }
+    if (!source.hasRemaining() || !delegate.canWrite()) {
       return 0;
     }
     int length = Math.min(PLAINTEXT_CHUNK, source.remaining());
@@ -51,8 +65,13 @@ public final class ProtectedTransport implements MemoryTransport, ConnectionClos
       byte[] record = session.protect(plaintext);
       outgoingFrame = ByteBuffer.allocate(Integer.BYTES + record.length);
       outgoingFrame.putInt(record.length).put(record).flip();
-      source.position(source.position() + length);
+      pendingPlaintextLength = length;
       flushPending();
+      if (outgoingFrame != null) {
+        return 0;
+      }
+      source.position(source.position() + length);
+      pendingPlaintextLength = 0;
       return length;
     } catch (GeneralSecurityException | RuntimeException exception) {
       fail(exception);
@@ -142,7 +161,7 @@ public final class ProtectedTransport implements MemoryTransport, ConnectionClos
     }
     // A pending frame may be drained by a following write, even while
     // the underlying ring still has outstanding data.
-    return delegate.canWrite();
+    return outgoingFrame != null || delegate.canWrite();
   }
 
   @Override

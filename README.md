@@ -382,3 +382,23 @@ MAPS_RDMA_TEST_ADDRESS=192.0.2.10 mvn test -Dtest=ManagedRdmaIntegrationTest
 The test requires the RDMA device and environment variable; otherwise it
 skips. This uses the pre-existing rsocket transport and does not introduce
 a separate direct ibverbs queue-pair API or device-registration interface.
+
+## Phase 6 hardening: partial-record and negotiation ownership
+
+Protected record writes preserve the caller's source position until a complete
+ciphertext frame has been accepted by the underlying transport. Retrying a
+short write resumes the pending frame without encrypting or submitting duplicate
+plaintext. `canWrite()` remains true when a pending frame must be drained.
+
+Managed RDMA listeners register accepted transports for shutdown before starting
+the peer negotiation worker, preventing shutdown from overlooking that peer.
+
+Run the deterministic partial-write regression suite on any JDK 25 platform:
+
+```bash
+mvn test -Dtest=ProtectedTransportHardeningTest,SecureHandshakeTest
+```
+
+These tests do not require RDMA hardware. Hardware-specific RDMA failure injection,
+cross-process crash races, fuzzing and extended soak tests remain independent
+verification work.
