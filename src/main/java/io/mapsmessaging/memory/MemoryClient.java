@@ -7,6 +7,7 @@
 package io.mapsmessaging.memory;
 
 import io.mapsmessaging.memory.rdma.RdmaTransport;
+import io.mapsmessaging.memory.rdma.RdmaSecure;
 import io.mapsmessaging.memory.shm.SharedMemoryTransport;
 import io.mapsmessaging.memory.shm.linux.LinuxRendezvous;
 import io.mapsmessaging.memory.shm.macos.MacRendezvous;
@@ -30,15 +31,17 @@ public final class MemoryClient {
   }
 
   static MemoryConnection connectConfigured(MemoryConnectionConfig config) throws IOException {
-    if (config.security() != null && (config.transport() != MemoryTransportType.SHARED_MEMORY
-        || config.address() instanceof InetSocketAddress)) {
+    if (config.security() != null && config.transport() == MemoryTransportType.SHARED_MEMORY
+        && config.address() instanceof InetSocketAddress) {
       throw new IOException("Authenticated transport requires a native shared-memory endpoint");
     }
     if (config.transport() == MemoryTransportType.RDMA) {
       if (!(config.address() instanceof InetSocketAddress address)) {
         throw new IllegalArgumentException("RDMA requires an Internet socket address");
       }
-      return connectRdma(address);
+      RdmaTransport transport = RdmaTransport.connect(address);
+      return new MemoryConnection(RdmaSecure.authenticate(transport, config.security(), false,
+          config.connectTimeoutMillis()), null, false);
     }
     if (config.address() instanceof UnixDomainSocketAddress unixAddress) {
       if (System.getProperty("os.name", "").equalsIgnoreCase("Mac OS X")) {

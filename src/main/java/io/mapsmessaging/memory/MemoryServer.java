@@ -7,6 +7,7 @@
 package io.mapsmessaging.memory;
 
 import io.mapsmessaging.memory.rdma.RdmaListener;
+import io.mapsmessaging.memory.rdma.RdmaSecure;
 import io.mapsmessaging.memory.rdma.RdmaTransport;
 import io.mapsmessaging.memory.shm.SharedMemoryTransport;
 import io.mapsmessaging.memory.shm.linux.LinuxRendezvous;
@@ -50,6 +51,8 @@ public final class MemoryServer implements AutoCloseable {
   private final MacRendezvous macListener;
   private final WindowsRendezvous windowsListener;
   private final Set<Integer> linuxNegotiating = ConcurrentHashMap.newKeySet();
+  private final java.util.concurrent.atomic.AtomicInteger rdmaNegotiating = new java.util.concurrent.atomic.AtomicInteger();
+  private final Set<RdmaTransport> rdmaNegotiatingTransport = ConcurrentHashMap.newKeySet();
   private final Set<Integer> macNegotiating = ConcurrentHashMap.newKeySet();
   private final Set<MemorySegment> windowsNegotiating = ConcurrentHashMap.newKeySet();
   private final MemorySecurity security;
@@ -90,8 +93,8 @@ public final class MemoryServer implements AutoCloseable {
   }
 
   static MemoryServer listenConfigured(MemoryEndpointConfig config) throws IOException {
-    if (config.security() != null && (config.transport() != MemoryTransportType.SHARED_MEMORY
-        || config.address() instanceof InetSocketAddress)) {
+    if (config.security() != null && config.transport() == MemoryTransportType.SHARED_MEMORY
+        && config.address() instanceof InetSocketAddress) {
       throw new IOException("Authenticated transport requires a native shared-memory endpoint");
     }
     if (config.transport() == MemoryTransportType.SHARED_MEMORY) {
@@ -158,7 +161,8 @@ public final class MemoryServer implements AutoCloseable {
     maxPendingConnections = config == null ? 0 : config.maxPendingConnections();
     handshakeTimeoutMillis = config == null ? HANDSHAKE_TIMEOUT_MILLIS : config.handshakeTimeoutMillis();
     negotiationSlots = config == null || config.maxNegotiations() == 0 ? null : new Semaphore(config.maxNegotiations());
-    boolean nativeListener = linuxListener != null || macListener != null || windowsListener != null;
+    boolean nativeListener = linuxListener != null || macListener != null || windowsListener != null
+        || rdmaListener != null;
     acceptThread = (nativeListener ? Thread.ofPlatform() : Thread.ofVirtual())
         .name("memory-server-accept").start(this::acceptLoop);
   }
@@ -235,6 +239,9 @@ public final class MemoryServer implements AutoCloseable {
         WindowsRendezvous.shutdownPeer(pipe);
       }
     }
+    for (RdmaTransport transport : rdmaNegotiatingTransport) {
+      transport.close();
+    }
     for (Socket socket : negotiating) {
       try {
         socket.close();
@@ -297,7 +304,11 @@ public final class MemoryServer implements AutoCloseable {
           Thread.ofPlatform().name("windows-shm-negotiate").start(() -> negotiateWindows(pipe));
         } else {
           RdmaTransport transport = rdmaListener.accept();
-          register(new MemoryConnection(transport, null, false));
+          if (!reserveRdmaNegotiation()) {
+            transport.close();
+            continue;
+          }
+          Thread.ofPlatform().name("rdma-negotiate").start(() -> negotiateRdma(transport));
         }
       } catch (IOException exception) {
         if (!closed.get()) {
@@ -351,6 +362,49 @@ public final class MemoryServer implements AutoCloseable {
       }
     } finally {
       negotiating.remove(socket);
+      if (negotiationSlots != null) {
+        negotiationSlots.release();
+      }
+    }
+  }
+
+  private boolean reserveRdmaNegotiation() {
+    if (negotiationSlots != null && !negotiationSlots.tryAcquire()) {
+      return false;
+    }
+    synchronized (lifecycleLock) {
+      if (closed.get() || capacityExceeded()) {
+        if (negotiationSlots != null) {
+          negotiationSlots.release();
+        }
+        return false;
+      }
+      rdmaNegotiating.incrementAndGet();
+      return true;
+    }
+  }
+
+  private void negotiateRdma(RdmaTransport transport) {
+    rdmaNegotiatingTransport.add(transport);
+    boolean counted = true;
+    try {
+      MemoryTransport secureTransport = RdmaSecure.authenticate(
+          transport, security, true, handshakeTimeoutMillis);
+      synchronized (lifecycleLock) {
+        rdmaNegotiating.decrementAndGet();
+        counted = false;
+      }
+      register(new MemoryConnection(secureTransport, null, false));
+    } catch (IOException | RuntimeException exception) {
+      LOGGER.log(Level.WARNING, "RDMA peer negotiation failed", exception);
+      transport.close();
+    } finally {
+      synchronized (lifecycleLock) {
+        if (counted) {
+          rdmaNegotiating.decrementAndGet();
+        }
+        rdmaNegotiatingTransport.remove(transport);
+      }
       if (negotiationSlots != null) {
         negotiationSlots.release();
       }
@@ -475,7 +529,8 @@ public final class MemoryServer implements AutoCloseable {
 
   private boolean capacityExceeded() {
     return (maxConnections > 0 && connections.size() + negotiating.size()
-        + linuxNegotiating.size() + macNegotiating.size() + windowsNegotiating.size() >= maxConnections)
+        + linuxNegotiating.size() + macNegotiating.size()
+        + windowsNegotiating.size() + rdmaNegotiating.get() >= maxConnections)
         || (maxPendingConnections > 0 && pending.size() >= maxPendingConnections);
   }
 

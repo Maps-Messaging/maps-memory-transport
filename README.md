@@ -336,3 +336,49 @@ Run on each target operating system:
 
 Windows and macOS native security integration still requires target-platform
 runtime verification before a production security claim is appropriate.
+
+## Phase 5: managed, authenticated RDMA
+
+The library retains its native rdma-core `rsocket` transport and existing
+`RdmaTransport`/`RdmaListener` APIs. Managed connections now use the configured
+capacity and handshake limits, negotiate on independent platform workers,
+and close rejected peers without publishing them to the application.
+
+When `MemorySecurity` is present on both endpoints, the RDMA connection first
+establishes its ordinary transport session, then exchanges authenticated
+Ed25519/X25519 offers and confirms session keys using `SecureWire`.
+Application data uses `ProtectedTransport`, with the same AES-256-GCM,
+ChaCha20-Poly1305 or HMAC-SHA-256 record protection as native shared memory.
+Security failures fail closed; no plain RDMA fallback is attempted.
+
+```java
+MemoryEndpointConfig endpoint = MemoryEndpointConfig.builder()
+    .transport(MemoryTransportType.RDMA)
+    .address(new InetSocketAddress("192.0.2.10", 7471))
+    .maxConnections(64)
+    .maxNegotiations(8)
+    .handshakeTimeoutMillis(10_000)
+    .security(serverSecurity)
+    .build();
+
+try (MemoryServer server = MemoryServer.listen(endpoint)) {
+  MemoryConnection peer = server.accept();
+}
+
+MemoryConnection client = MemoryClient.connect(
+    new MemoryConnectionConfig(MemoryTransportType.RDMA,
+        new InetSocketAddress("192.0.2.10", 7471), 10_000, clientSecurity));
+```
+
+The listener and client must use matching protection modes and explicit
+trust policies. HMAC protection authenticates records but does not encrypt
+them. Run on an RDMA-enabled Linux host with an address bound to an RDMA
+interface:
+
+```bash
+MAPS_RDMA_TEST_ADDRESS=192.0.2.10 mvn test -Dtest=ManagedRdmaIntegrationTest
+```
+
+The test requires the RDMA device and environment variable; otherwise it
+skips. This uses the pre-existing rsocket transport and does not introduce
+a separate direct ibverbs queue-pair API or device-registration interface.
