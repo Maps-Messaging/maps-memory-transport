@@ -6,6 +6,11 @@
 package io.mapsmessaging.memory.shm.macos;
 
 import java.io.IOException;
+import io.mapsmessaging.memory.MemoryTransport;
+import io.mapsmessaging.memory.security.MemorySecurity;
+import io.mapsmessaging.memory.security.SecureWire;
+import io.mapsmessaging.memory.security.SecureSession;
+import io.mapsmessaging.memory.security.ProtectedTransport;
 import java.net.UnixDomainSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -28,10 +33,16 @@ public final class MacRendezvous implements AutoCloseable {
   private final int serverDescriptor;
   private final int slotSize;
   private final int slotCount;
+  private final MemorySecurity security;
   private final AtomicBoolean closed = new AtomicBoolean();
 
   public static MacRendezvous listen(UnixDomainSocketAddress address, int slotSize, int slotCount, int backlog)
       throws IOException {
+    return listen(address, slotSize, slotCount, backlog, null);
+  }
+
+  public static MacRendezvous listen(UnixDomainSocketAddress address, int slotSize, int slotCount, int backlog,
+      MemorySecurity security) throws IOException {
     requireMacBackend();
     long regionSize = MacMemoryTransport.regionSize(slotSize, slotCount);
     if (regionSize > Integer.MAX_VALUE || backlog < 1) {
@@ -49,7 +60,7 @@ public final class MacRendezvous implements AutoCloseable {
       bound = true;
       Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"));
       MacNative.listen(descriptor, backlog);
-      return new MacRendezvous(path, descriptor, slotSize, slotCount);
+      return new MacRendezvous(path, descriptor, slotSize, slotCount, security);
     } catch (IOException | RuntimeException exception) {
       MacNative.close(descriptor);
       if (bound) {
@@ -63,11 +74,12 @@ public final class MacRendezvous implements AutoCloseable {
     }
   }
 
-  private MacRendezvous(Path path, int descriptor, int slotSize, int slotCount) {
+  private MacRendezvous(Path path, int descriptor, int slotSize, int slotCount, MemorySecurity security) {
     this.path = path;
     serverDescriptor = descriptor;
     this.slotSize = slotSize;
     this.slotCount = slotCount;
+    this.security = security;
   }
 
   public int acceptDescriptor() throws IOException {
@@ -84,16 +96,20 @@ public final class MacRendezvous implements AutoCloseable {
     throw new IOException("macOS rendezvous listener is closed");
   }
 
-  public MacMemoryTransport accept() throws IOException {
+  public MemoryTransport accept() throws IOException {
     return completeAccept(acceptDescriptor(), 5_000);
   }
 
-  public MacMemoryTransport completeAccept(int peer, int timeoutMillis) throws IOException {
+  public MemoryTransport completeAccept(int peer, int timeoutMillis) throws IOException {
+    return completeAccept(peer, timeoutMillis, security);
+  }
+
+  public MemoryTransport completeAccept(int peer, int timeoutMillis, MemorySecurity security) throws IOException {
     boolean transportOwnsSocket = false;
     try {
       MacNative.setSocketTimeout(peer, timeoutMillis);
       verifyPeer(peer);
-      MacNative.sendByte(peer, PROTOCOL_VERSION);
+      MacNative.sendByte(peer, security == null ? PROTOCOL_VERSION : 2);
       sendInt(peer, slotSize);
       sendInt(peer, slotCount);
       long size = MacMemoryTransport.regionSize(slotSize, slotCount);
@@ -115,8 +131,10 @@ public final class MacRendezvous implements AutoCloseable {
           }
           MacNative.sendByte(peer, 0x52);
           MacNative.setSocketTimeout(peer, 6_000);
+          SecureSession session = security == null ? null : SecureWire.authenticate(security, true,
+              () -> MacNative.receiveByte(peer), value -> MacNative.sendByte(peer, value));
           transport.start();
-          return transport;
+          return session == null ? transport : new ProtectedTransport(transport, session);
         } catch (IOException | RuntimeException exception) {
 
           try {
@@ -145,11 +163,16 @@ public final class MacRendezvous implements AutoCloseable {
     }
   }
 
-  public static MacMemoryTransport connect(UnixDomainSocketAddress address) throws IOException {
+  public static MemoryTransport connect(UnixDomainSocketAddress address) throws IOException {
     return connect(address, 5_000);
   }
 
-  public static MacMemoryTransport connect(UnixDomainSocketAddress address, int timeoutMillis) throws IOException {
+  public static MemoryTransport connect(UnixDomainSocketAddress address, int timeoutMillis) throws IOException {
+    return connect(address, timeoutMillis, null);
+  }
+
+  public static MemoryTransport connect(UnixDomainSocketAddress address, int timeoutMillis,
+      MemorySecurity security) throws IOException {
     requireMacBackend();
     Path path = address.getPath().toAbsolutePath().normalize();
     int socket = MacNative.openSocket();
@@ -159,7 +182,7 @@ public final class MacRendezvous implements AutoCloseable {
       MacNative.setSocketTimeout(socket, timeoutMillis);
       verifyPeer(socket);
       int version = MacNative.receiveByte(socket);
-      if (version != PROTOCOL_VERSION) {
+      if (version != (security == null ? PROTOCOL_VERSION : 2)) {
         throw new IOException("Unsupported macOS shared-memory version " + version);
       }
       int slotSize = receiveInt(socket);
@@ -184,8 +207,10 @@ public final class MacRendezvous implements AutoCloseable {
           throw new IOException("macOS shared-memory server did not confirm readiness");
         }
         MacNative.setSocketTimeout(socket, 6_000);
+        SecureSession session = security == null ? null : SecureWire.authenticate(security, false,
+            () -> MacNative.receiveByte(socket), value -> MacNative.sendByte(socket, value));
         transport.start();
-        return transport;
+        return session == null ? transport : new ProtectedTransport(transport, session);
       } catch (IOException | RuntimeException exception) {
 
         try {

@@ -15,6 +15,7 @@ import io.mapsmessaging.memory.shm.macos.MacMemoryTransport;
 import io.mapsmessaging.memory.shm.macos.MacRendezvous;
 import io.mapsmessaging.memory.shm.windows.WindowsMemoryTransport;
 import io.mapsmessaging.memory.shm.windows.WindowsRendezvous;
+import io.mapsmessaging.memory.security.MemorySecurity;
 import java.lang.foreign.MemorySegment;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -51,6 +52,7 @@ public final class MemoryServer implements AutoCloseable {
   private final Set<Integer> linuxNegotiating = ConcurrentHashMap.newKeySet();
   private final Set<Integer> macNegotiating = ConcurrentHashMap.newKeySet();
   private final Set<MemorySegment> windowsNegotiating = ConcurrentHashMap.newKeySet();
+  private final MemorySecurity security;
   private final int slotSize;
   private final int slotCount;
   private final BlockingQueue<MemoryConnection> pending = new LinkedBlockingQueue<>();
@@ -88,23 +90,24 @@ public final class MemoryServer implements AutoCloseable {
   }
 
   static MemoryServer listenConfigured(MemoryEndpointConfig config) throws IOException {
-    if (config.security() != null) {
-      throw new IOException("Authenticated transport is not yet implemented");
+    if (config.security() != null && (config.transport() != MemoryTransportType.SHARED_MEMORY
+        || config.address() instanceof InetSocketAddress)) {
+      throw new IOException("Authenticated transport requires a native shared-memory endpoint");
     }
     if (config.transport() == MemoryTransportType.SHARED_MEMORY) {
       if (config.address() instanceof UnixDomainSocketAddress unixAddress) {
         if (System.getProperty("os.name", "").equalsIgnoreCase("Mac OS X")) {
           return new MemoryServer(MacRendezvous.listen(unixAddress,
-              config.slotSize(), config.slotCount(), DEFAULT_BACKLOG), config);
+              config.slotSize(), config.slotCount(), DEFAULT_BACKLOG, config.security()), config);
         }
         if (System.getProperty("os.name", "").equalsIgnoreCase("Linux")) {
           return new MemoryServer(LinuxRendezvous.listen(unixAddress,
-              config.slotSize(), config.slotCount(), DEFAULT_BACKLOG), config);
+              config.slotSize(), config.slotCount(), DEFAULT_BACKLOG, config.security()), config);
         }
         throw new IOException("Unix domain shared-memory transport is unavailable on this platform");
       }
       if (config.address() instanceof WindowsPipeAddress windowsAddress) {
-        return new MemoryServer(WindowsRendezvous.listen(windowsAddress), config);
+        return new MemoryServer(WindowsRendezvous.listen(windowsAddress, config.security()), config);
       }
       if (!(config.address() instanceof InetSocketAddress address)) {
         throw new IllegalArgumentException("Unsupported shared-memory address type");
@@ -149,6 +152,7 @@ public final class MemoryServer implements AutoCloseable {
     this.macListener = macListener;
     this.windowsListener = windowsListener;
     this.slotSize = slotSize;
+    this.security = config == null ? null : config.security();
     this.slotCount = slotCount;
     maxConnections = config == null ? 0 : config.maxConnections();
     maxPendingConnections = config == null ? 0 : config.maxPendingConnections();
@@ -403,7 +407,7 @@ public final class MemoryServer implements AutoCloseable {
 
   private void negotiateLinux(int descriptor) {
     try {
-      LinuxMemoryTransport transport = linuxListener.completeAccept(descriptor, handshakeTimeoutMillis);
+      MemoryTransport transport = linuxListener.completeAccept(descriptor, handshakeTimeoutMillis, security);
       synchronized (lifecycleLock) {
         linuxNegotiating.remove(descriptor);
       }
@@ -420,7 +424,7 @@ public final class MemoryServer implements AutoCloseable {
 
   private void negotiateMac(int descriptor) {
     try {
-      MacMemoryTransport transport = macListener.completeAccept(descriptor, handshakeTimeoutMillis);
+      MemoryTransport transport = macListener.completeAccept(descriptor, handshakeTimeoutMillis, security);
       synchronized (lifecycleLock) {
         macNegotiating.remove(descriptor);
       }
@@ -437,8 +441,8 @@ public final class MemoryServer implements AutoCloseable {
 
   private void negotiateWindows(MemorySegment pipe) {
     try {
-      WindowsMemoryTransport transport = windowsListener.completeAccept(pipe,
-          slotSize, slotCount, handshakeTimeoutMillis);
+      MemoryTransport transport = windowsListener.completeAccept(pipe,
+          slotSize, slotCount, handshakeTimeoutMillis, security);
       synchronized (lifecycleLock) {
         windowsNegotiating.remove(pipe);
       }

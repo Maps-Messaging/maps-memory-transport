@@ -7,6 +7,11 @@ package io.mapsmessaging.memory.shm.windows;
 
 import io.mapsmessaging.memory.WindowsPipeAddress;
 import java.io.IOException;
+import io.mapsmessaging.memory.MemoryTransport;
+import io.mapsmessaging.memory.security.MemorySecurity;
+import io.mapsmessaging.memory.security.SecureWire;
+import io.mapsmessaging.memory.security.SecureSession;
+import io.mapsmessaging.memory.security.ProtectedTransport;
 import java.lang.foreign.MemorySegment;
 import java.util.concurrent.atomic.AtomicBoolean;
 
@@ -18,15 +23,20 @@ public final class WindowsRendezvous implements AutoCloseable {
 
   private static final int VERSION = 1;
   private final WindowsPipeAddress address;
+  private final MemorySecurity security;
   private final AtomicBoolean closed = new AtomicBoolean();
   private final Object listenerLock = new Object();
   private MemorySegment pendingPipe;
 
   public static WindowsRendezvous listen(WindowsPipeAddress address) throws IOException {
+    return listen(address, null);
+  }
+
+  public static WindowsRendezvous listen(WindowsPipeAddress address, MemorySecurity security) throws IOException {
     if (!windowsSupported()) {
       throw new IOException("Windows native shared memory requires Windows x64 or ARM64");
     }
-    return new WindowsRendezvous(address);
+    return new WindowsRendezvous(address, security);
   }
 
   private static boolean windowsSupported() {
@@ -37,8 +47,9 @@ public final class WindowsRendezvous implements AutoCloseable {
             || architecture.equals("aarch64"));
   }
 
-  private WindowsRendezvous(WindowsPipeAddress address) {
+  private WindowsRendezvous(WindowsPipeAddress address, MemorySecurity security) {
     this.address = address;
+    this.security = security;
   }
 
   public WindowsPipeAddress localAddress() {
@@ -86,8 +97,13 @@ public final class WindowsRendezvous implements AutoCloseable {
     }
   }
 
-  public WindowsMemoryTransport completeAccept(MemorySegment pipe, int slotSize, int slotCount,
+  public MemoryTransport completeAccept(MemorySegment pipe, int slotSize, int slotCount,
       int timeoutMillis) throws IOException {
+    return completeAccept(pipe, slotSize, slotCount, timeoutMillis, security);
+  }
+
+  public MemoryTransport completeAccept(MemorySegment pipe, int slotSize, int slotCount,
+      int timeoutMillis, MemorySecurity security) throws IOException {
     boolean transportOwnsPipe = false;
     try {
       WindowsNative.verifyPeer(pipe, true);
@@ -110,7 +126,7 @@ public final class WindowsRendezvous implements AutoCloseable {
             slotSize, slotCount, true, true, "shm-windows:" + address.name());
         transportOwnsPipe = true;
         try {
-          WindowsNative.sendByte(pipe, VERSION);
+          WindowsNative.sendByte(pipe, security == null ? VERSION : 2);
           sendInt(pipe, slotSize);
           sendInt(pipe, slotCount);
           sendLong(pipe, remoteOutbound.address());
@@ -119,9 +135,11 @@ public final class WindowsRendezvous implements AutoCloseable {
             throw new IOException("Windows client did not confirm shared mapping attachment");
           }
           WindowsNative.sendByte(pipe, 0x52);
+          SecureSession session = security == null ? null : SecureWire.authenticate(security, true,
+              () -> WindowsNative.receiveByte(pipe, timeoutMillis), value -> WindowsNative.sendByte(pipe, value));
           transport.start();
           established = true;
-          return transport;
+          return session == null ? transport : new ProtectedTransport(transport, session);
         } catch (IOException | RuntimeException exception) {
           // Revoke duplicate handles before closing the control pipe.
           WindowsNative.closeRemoteHandle(pipe, remoteOutbound);
@@ -151,8 +169,13 @@ public final class WindowsRendezvous implements AutoCloseable {
     }
   }
 
-  public static WindowsMemoryTransport connect(WindowsPipeAddress address, int timeoutMillis)
+  public static MemoryTransport connect(WindowsPipeAddress address, int timeoutMillis)
       throws IOException {
+    return connect(address, timeoutMillis, null);
+  }
+
+  public static MemoryTransport connect(WindowsPipeAddress address, int timeoutMillis,
+      MemorySecurity security) throws IOException {
     if (!windowsSupported()) {
       throw new IOException("Windows native shared memory requires Windows x64 or ARM64");
     }
@@ -180,7 +203,7 @@ public final class WindowsRendezvous implements AutoCloseable {
     try {
       WindowsNative.verifyPeer(pipe, false);
       int version = WindowsNative.receiveByte(pipe, timeoutMillis);
-      if (version != VERSION) {
+      if (version != (security == null ? VERSION : 2)) {
         throw new IOException("Unsupported Windows shared-memory protocol version " + version);
       }
       int slotSize = receiveInt(pipe, timeoutMillis);
@@ -203,8 +226,10 @@ public final class WindowsRendezvous implements AutoCloseable {
           if (WindowsNative.receiveByte(pipe, timeoutMillis) != 0x52) {
             throw new IOException("Windows server did not confirm attachment");
           }
+          SecureSession session = security == null ? null : SecureWire.authenticate(security, false,
+              () -> WindowsNative.receiveByte(pipe, timeoutMillis), value -> WindowsNative.sendByte(pipe, value));
           transport.start();
-          return transport;
+          return session == null ? transport : new ProtectedTransport(transport, session);
         } catch (IOException | RuntimeException exception) {
           try {
             transport.close();

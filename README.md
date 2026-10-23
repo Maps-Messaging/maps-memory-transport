@@ -318,10 +318,21 @@ mutually authenticated X25519/Ed25519 cryptographic protocol with:
 - Sequence-based replay rejection, bounded record length and key cleanup
 - Tamper, trust, mismatch and replay regression tests
 
-**Important:** This cryptographic foundation is not yet integrated with
-platform rendezvous. The configured connection API continues to reject
-non-null `MemorySecurity` rather than silently connecting without negotiated
-protection. Platform handshake wiring and encrypted shared-memory record
-framing must be completed before Phase 4 may be declared functional.
+The authenticated handshake is now wired into the Linux, macOS and Windows
+native rendezvous. Configured `MemorySecurity` connections use protocol version
+2, exchange signed offers over the local control socket or named pipe, confirm
+directional session keys, and wrap the shared-memory ring in
+`ProtectedTransport`. Applications cannot read unauthenticated plaintext.
+Protected records include a bounded length, session-bound sequence number
+and authentication tag. HMAC mode authenticates but does not encrypt payloads.
 
-Run: `mvn test -Dtest=SecureHandshakeTest`
+Existing unconfigured native peers continue to use protocol version 1.
+Configured security is rejected on legacy file-backed endpoints and RDMA;
+secure endpoints never silently fall back to unprotected mode. Both ends must
+configure `MemorySecurity` and explicitly trust the other's Ed25519 identity.
+
+Run on each target operating system:
+`mvn clean test -Dtest=SecureHandshakeTest,SecureNativeEndpointTest`
+
+Windows and macOS native security integration still requires target-platform
+runtime verification before a production security claim is appropriate.

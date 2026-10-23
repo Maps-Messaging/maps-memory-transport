@@ -6,6 +6,11 @@
 package io.mapsmessaging.memory.shm.linux;
 
 import java.io.IOException;
+import io.mapsmessaging.memory.MemoryTransport;
+import io.mapsmessaging.memory.security.MemorySecurity;
+import io.mapsmessaging.memory.security.SecureWire;
+import io.mapsmessaging.memory.security.SecureSession;
+import io.mapsmessaging.memory.security.ProtectedTransport;
 import java.net.UnixDomainSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -28,10 +33,16 @@ public final class LinuxRendezvous implements AutoCloseable {
   private final int serverDescriptor;
   private final int slotSize;
   private final int slotCount;
+  private final MemorySecurity security;
   private final AtomicBoolean closed = new AtomicBoolean();
 
   public static LinuxRendezvous listen(UnixDomainSocketAddress address, int slotSize, int slotCount, int backlog)
       throws IOException {
+    return listen(address, slotSize, slotCount, backlog, null);
+  }
+
+  public static LinuxRendezvous listen(UnixDomainSocketAddress address, int slotSize, int slotCount, int backlog,
+      MemorySecurity security) throws IOException {
     requireLinuxBackend();
     long regionSize = LinuxMemoryTransport.regionSize(slotSize, slotCount);
     if (regionSize > Integer.MAX_VALUE || backlog < 1) {
@@ -49,7 +60,7 @@ public final class LinuxRendezvous implements AutoCloseable {
       bound = true;
       Files.setPosixFilePermissions(path, PosixFilePermissions.fromString("rw-------"));
       LinuxNative.listen(descriptor, backlog);
-      return new LinuxRendezvous(path, descriptor, slotSize, slotCount);
+      return new LinuxRendezvous(path, descriptor, slotSize, slotCount, security);
     } catch (IOException | RuntimeException exception) {
       LinuxNative.close(descriptor);
       if (bound) {
@@ -63,11 +74,12 @@ public final class LinuxRendezvous implements AutoCloseable {
     }
   }
 
-  private LinuxRendezvous(Path path, int descriptor, int slotSize, int slotCount) {
+  private LinuxRendezvous(Path path, int descriptor, int slotSize, int slotCount, MemorySecurity security) {
     this.path = path;
     serverDescriptor = descriptor;
     this.slotSize = slotSize;
     this.slotCount = slotCount;
+    this.security = security;
   }
 
   public int acceptDescriptor() throws IOException {
@@ -77,16 +89,20 @@ public final class LinuxRendezvous implements AutoCloseable {
     return LinuxNative.accept(serverDescriptor);
   }
 
-  public LinuxMemoryTransport accept() throws IOException {
+  public MemoryTransport accept() throws IOException {
     return completeAccept(acceptDescriptor(), 5_000);
   }
 
-  public LinuxMemoryTransport completeAccept(int peer, int timeoutMillis) throws IOException {
+  public MemoryTransport completeAccept(int peer, int timeoutMillis) throws IOException {
+    return completeAccept(peer, timeoutMillis, security);
+  }
+
+  public MemoryTransport completeAccept(int peer, int timeoutMillis, MemorySecurity security) throws IOException {
     boolean transportOwnsSocket = false;
     try {
       LinuxNative.setSocketTimeout(peer, timeoutMillis);
       verifyPeer(peer);
-      LinuxNative.sendByte(peer, PROTOCOL_VERSION);
+      LinuxNative.sendByte(peer, security == null ? PROTOCOL_VERSION : 2);
       sendInt(peer, slotSize);
       sendInt(peer, slotCount);
       long size = LinuxMemoryTransport.regionSize(slotSize, slotCount);
@@ -106,8 +122,10 @@ public final class LinuxRendezvous implements AutoCloseable {
           }
           LinuxNative.sendByte(peer, 0x52);
           LinuxNative.setSocketTimeout(peer, 6_000);
+          SecureSession session = security == null ? null : SecureWire.authenticate(security, true,
+              () -> LinuxNative.receiveByte(peer), value -> LinuxNative.sendByte(peer, value));
           transport.start();
-          return transport;
+          return session == null ? transport : new ProtectedTransport(transport, session);
         } catch (IOException | RuntimeException exception) {
 
           try {
@@ -136,11 +154,16 @@ public final class LinuxRendezvous implements AutoCloseable {
     }
   }
 
-  public static LinuxMemoryTransport connect(UnixDomainSocketAddress address) throws IOException {
+  public static MemoryTransport connect(UnixDomainSocketAddress address) throws IOException {
     return connect(address, 5_000);
   }
 
-  public static LinuxMemoryTransport connect(UnixDomainSocketAddress address, int timeoutMillis) throws IOException {
+  public static MemoryTransport connect(UnixDomainSocketAddress address, int timeoutMillis) throws IOException {
+    return connect(address, timeoutMillis, null);
+  }
+
+  public static MemoryTransport connect(UnixDomainSocketAddress address, int timeoutMillis,
+      MemorySecurity security) throws IOException {
     requireLinuxBackend();
     Path path = address.getPath().toAbsolutePath().normalize();
     int socket = LinuxNative.openSocket();
@@ -150,7 +173,7 @@ public final class LinuxRendezvous implements AutoCloseable {
       LinuxNative.setSocketTimeout(socket, timeoutMillis);
       verifyPeer(socket);
       int version = LinuxNative.receiveByte(socket);
-      if (version != PROTOCOL_VERSION) {
+      if (version != (security == null ? PROTOCOL_VERSION : 2)) {
         throw new IOException("Unsupported Linux shared-memory version " + version);
       }
       int slotSize = receiveInt(socket);
@@ -175,8 +198,10 @@ public final class LinuxRendezvous implements AutoCloseable {
           throw new IOException("Linux shared-memory server did not confirm readiness");
         }
         LinuxNative.setSocketTimeout(socket, 6_000);
+        SecureSession session = security == null ? null : SecureWire.authenticate(security, false,
+            () -> LinuxNative.receiveByte(socket), value -> LinuxNative.sendByte(socket, value));
         transport.start();
-        return transport;
+        return session == null ? transport : new ProtectedTransport(transport, session);
       } catch (IOException | RuntimeException exception) {
 
         try {

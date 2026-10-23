@@ -30,8 +30,9 @@ public final class MemoryClient {
   }
 
   static MemoryConnection connectConfigured(MemoryConnectionConfig config) throws IOException {
-    if (config.security() != null) {
-      throw new IOException("Authenticated transport is not yet implemented");
+    if (config.security() != null && (config.transport() != MemoryTransportType.SHARED_MEMORY
+        || config.address() instanceof InetSocketAddress)) {
+      throw new IOException("Authenticated transport requires a native shared-memory endpoint");
     }
     if (config.transport() == MemoryTransportType.RDMA) {
       if (!(config.address() instanceof InetSocketAddress address)) {
@@ -41,15 +42,15 @@ public final class MemoryClient {
     }
     if (config.address() instanceof UnixDomainSocketAddress unixAddress) {
       if (System.getProperty("os.name", "").equalsIgnoreCase("Mac OS X")) {
-        return new MemoryConnection(MacRendezvous.connect(unixAddress, config.connectTimeoutMillis()), null, false);
+        return new MemoryConnection(MacRendezvous.connect(unixAddress, config.connectTimeoutMillis(), config.security()), null, false);
       }
       if (System.getProperty("os.name", "").equalsIgnoreCase("Linux")) {
-        return new MemoryConnection(LinuxRendezvous.connect(unixAddress, config.connectTimeoutMillis()), null, false);
+        return new MemoryConnection(LinuxRendezvous.connect(unixAddress, config.connectTimeoutMillis(), config.security()), null, false);
       }
       throw new IOException("Unix-domain shared-memory transport is unavailable on this platform");
     }
     if (config.address() instanceof WindowsPipeAddress windowsAddress) {
-      return new MemoryConnection(WindowsRendezvous.connect(windowsAddress, config.connectTimeoutMillis()), null, false);
+      return new MemoryConnection(WindowsRendezvous.connect(windowsAddress, config.connectTimeoutMillis(), config.security()), null, false);
     }
     if (!(config.address() instanceof InetSocketAddress address)) {
       throw new IllegalArgumentException("Unsupported shared-memory address type");
