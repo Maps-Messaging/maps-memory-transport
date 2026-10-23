@@ -5,6 +5,7 @@
  * (the "License"); you may not use this file except in compliance with the License.
  */
 module io.mapsmessaging.memory {
+  requires java.logging;
   exports io.mapsmessaging.memory;
   exports io.mapsmessaging.memory.rdma;
   exports io.mapsmessaging.memory.shm;
