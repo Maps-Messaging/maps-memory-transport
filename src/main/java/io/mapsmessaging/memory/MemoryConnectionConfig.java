@@ -7,10 +7,12 @@ package io.mapsmessaging.memory;
 
 import io.mapsmessaging.memory.security.MemorySecurity;
 import java.net.InetSocketAddress;
+import java.net.SocketAddress;
+import java.net.UnixDomainSocketAddress;
 import java.util.Objects;
 
 /** Immutable outbound configuration; security is reserved for the authenticated-transport phase. */
-public record MemoryConnectionConfig(MemoryTransportType transport, InetSocketAddress address,
+public record MemoryConnectionConfig(MemoryTransportType transport, SocketAddress address,
                                      int connectTimeoutMillis, MemorySecurity security) {
   public MemoryConnectionConfig {
     Objects.requireNonNull(transport, "transport");
@@ -21,6 +23,10 @@ public record MemoryConnectionConfig(MemoryTransportType transport, InetSocketAd
   }
 
   public static MemoryConnectionConfig sharedMemory(InetSocketAddress address) {
+    return new MemoryConnectionConfig(MemoryTransportType.SHARED_MEMORY, address, 5_000, null);
+  }
+
+  public static MemoryConnectionConfig linuxSharedMemory(UnixDomainSocketAddress address) {
     return new MemoryConnectionConfig(MemoryTransportType.SHARED_MEMORY, address, 5_000, null);
   }
 

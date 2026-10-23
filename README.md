@@ -166,3 +166,55 @@ providers are not part of this phase. Passing a non-null `MemorySecurity` curren
 fails explicitly: cryptographic handshake and native security are not yet implemented.
 The existing managed local rendezvous remains loopback TCP and mapped files until the
 secure platform-provider stages. Do not use it across an untrusted process boundary.
+
+## Linux memfd shared-memory endpoints
+
+On Linux x86_64 and aarch64, the configured shared-memory endpoint accepts a
+`UnixDomainSocketAddress` and uses a Unix-domain control socket, kernel-provided
+`SO_PEERCRED` credentials and two anonymous memfd mappings. Each direction has
+its own SPSC ring; descriptors are transferred using `SCM_RIGHTS`, and the receiver
+checks that each received memfd has the expected size and shrink/grow seals.
+Both sides acknowledge attachment before application I/O begins.
+
+```java
+Path directory = Path.of("/run/user/1000/mapsmessaging");
+UnixDomainSocketAddress address =
+    UnixDomainSocketAddress.of(directory.resolve("transport.sock"));
+
+MemoryEndpointConfig config = MemoryEndpointConfig.builder()
+    .transport(MemoryTransportType.SHARED_MEMORY)
+    .address(address)
+    .build();
+
+try (MemoryServer server = MemoryServer.listen(config)) {
+  MemoryConnection inbound = server.accept();
+  // Use the ordinary MemoryTransport read/write contract.
+}
+
+try (MemoryConnection outbound =
+         MemoryClient.connect(MemoryConnectionConfig.linuxSharedMemory(address))) {
+  // Exchange data with the server through the two negotiated rings.
+}
+```
+
+The listening directory must already exist and disallow group/other traversal.
+The socket is restricted to owner access. The native admission policy requires
+the connecting process to have the same effective Unix UID as the server;
+no client-supplied UID is trusted. Linux processes running under the same UID
+are within the same local trust boundary, not isolated from each other.
+
+The legacy `InetSocketAddress` shared-memory factories retain their original
+file-backed implementation for compatibility. Linux memfd requires an explicit
+`UnixDomainSocketAddress`; unsupported platforms fail rather than falling back
+to named files.
+
+The FFM native calls require native-access permission. Surefire and the
+cross-process test launcher configure this on JDK 25. To run the Linux tests:
+
+```bash
+mvn test -Dtest=LinuxMemfdEndpointTest
+```
+
+Windows and macOS skip Linux-native integration tests. The Linux backend does
+not yet implement optional Ed25519 authentication or cryptographic record
+protection. Those remain a separate security phase.

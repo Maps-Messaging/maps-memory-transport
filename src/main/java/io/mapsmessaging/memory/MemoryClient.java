@@ -8,6 +8,8 @@ package io.mapsmessaging.memory;
 
 import io.mapsmessaging.memory.rdma.RdmaTransport;
 import io.mapsmessaging.memory.shm.SharedMemoryTransport;
+import io.mapsmessaging.memory.shm.linux.LinuxRendezvous;
+import java.net.UnixDomainSocketAddress;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -30,9 +32,18 @@ public final class MemoryClient {
       throw new IOException("Authenticated transport is not yet implemented");
     }
     if (config.transport() == MemoryTransportType.RDMA) {
-      return connectRdma(config.address());
+      if (!(config.address() instanceof InetSocketAddress address)) {
+        throw new IllegalArgumentException("RDMA requires an Internet socket address");
+      }
+      return connectRdma(address);
     }
-    return connectSharedMemory(config.address(), config.connectTimeoutMillis());
+    if (config.address() instanceof UnixDomainSocketAddress unixAddress) {
+      return new MemoryConnection(LinuxRendezvous.connect(unixAddress, config.connectTimeoutMillis()), null, false);
+    }
+    if (!(config.address() instanceof InetSocketAddress address)) {
+      throw new IllegalArgumentException("Unsupported shared-memory address type");
+    }
+    return connectSharedMemory(address, config.connectTimeoutMillis());
   }
 
   public static MemoryConnection connectSharedMemory(InetSocketAddress address) throws IOException {

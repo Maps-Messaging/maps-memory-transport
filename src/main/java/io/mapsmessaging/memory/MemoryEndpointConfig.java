@@ -6,14 +6,14 @@
 package io.mapsmessaging.memory;
 
 import io.mapsmessaging.memory.security.MemorySecurity;
-import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.util.Objects;
 
 /** Immutable managed-listener configuration. Zero limits mean unlimited legacy-style capacity. */
 public final class MemoryEndpointConfig {
 
   private final MemoryTransportType transport;
-  private final InetSocketAddress address;
+  private final SocketAddress address;
   private final int slotSize;
   private final int slotCount;
   private final int maxConnections;
@@ -45,7 +45,7 @@ public final class MemoryEndpointConfig {
   public MemoryTransportType transport() {
     return transport;
   }
-  public InetSocketAddress address() {
+  public SocketAddress address() {
     return address;
   }
   public int slotSize() {
@@ -72,7 +72,7 @@ public final class MemoryEndpointConfig {
 
   public static final class Builder {
     private MemoryTransportType transport = MemoryTransportType.SHARED_MEMORY;
-    private InetSocketAddress address;
+    private SocketAddress address;
     private int slotSize = 64 * 1024;
     private int slotCount = 256;
     private int maxConnections = 64;
@@ -87,7 +87,7 @@ public final class MemoryEndpointConfig {
       transport = value;
       return this;
     }
-    public Builder address(InetSocketAddress value) {
+    public Builder address(SocketAddress value) {
       address = value;
       return this;
     }

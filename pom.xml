@@ -74,7 +74,7 @@
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.6.0</version>
         <configuration>
-          <argLine>@{argLine}</argLine>
+          <argLine>@{argLine} --enable-native-access=ALL-UNNAMED</argLine>
           <useModulePath>false</useModulePath>
         </configuration>
       </plugin>

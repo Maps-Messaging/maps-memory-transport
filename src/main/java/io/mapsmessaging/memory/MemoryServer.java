@@ -9,6 +9,8 @@ package io.mapsmessaging.memory;
 import io.mapsmessaging.memory.rdma.RdmaListener;
 import io.mapsmessaging.memory.rdma.RdmaTransport;
 import io.mapsmessaging.memory.shm.SharedMemoryTransport;
+import io.mapsmessaging.memory.shm.linux.LinuxRendezvous;
+import io.mapsmessaging.memory.shm.linux.LinuxMemoryTransport;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
@@ -16,6 +18,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketAddress;
+import java.net.UnixDomainSocketAddress;
 import java.nio.file.Files;
 import java.util.Set;
 import java.util.UUID;
@@ -34,6 +37,8 @@ public final class MemoryServer implements AutoCloseable {
 
   private final ServerSocket localListener;
   private final RdmaListener rdmaListener;
+  private final LinuxRendezvous linuxListener;
+  private final Set<Integer> linuxNegotiating = ConcurrentHashMap.newKeySet();
   private final int slotSize;
   private final int slotCount;
   private final BlockingQueue<MemoryConnection> pending = new LinkedBlockingQueue<>();
@@ -75,21 +80,41 @@ public final class MemoryServer implements AutoCloseable {
       throw new IOException("Authenticated transport is not yet implemented");
     }
     if (config.transport() == MemoryTransportType.SHARED_MEMORY) {
-      requireLoopback(config.address());
+      if (config.address() instanceof UnixDomainSocketAddress unixAddress) {
+        return new MemoryServer(LinuxRendezvous.listen(unixAddress,
+            config.slotSize(), config.slotCount(), DEFAULT_BACKLOG), config);
+      }
+      if (!(config.address() instanceof InetSocketAddress address)) {
+        throw new IllegalArgumentException("Unsupported shared-memory address type");
+      }
+      requireLoopback(address);
       ServerSocket listener = new ServerSocket();
-      listener.bind(config.address(), DEFAULT_BACKLOG);
+      listener.bind(address, DEFAULT_BACKLOG);
       return new MemoryServer(listener, null, config.slotSize(), config.slotCount(), config);
     }
-    return new MemoryServer(null, RdmaListener.bind(config.address()), 0, 0, config);
+    if (!(config.address() instanceof InetSocketAddress address)) {
+      throw new IllegalArgumentException("RDMA requires an Internet socket address");
+    }
+    return new MemoryServer(null, RdmaListener.bind(address), 0, 0, config);
   }
 
   private MemoryServer(ServerSocket localListener, RdmaListener rdmaListener, int slotSize, int slotCount) {
     this(localListener, rdmaListener, slotSize, slotCount, null);
   }
 
+  private MemoryServer(LinuxRendezvous linuxListener, MemoryEndpointConfig config) {
+    this(null, null, linuxListener, config.slotSize(), config.slotCount(), config);
+  }
+
   private MemoryServer(ServerSocket localListener, RdmaListener rdmaListener, int slotSize, int slotCount, MemoryEndpointConfig config) {
+    this(localListener, rdmaListener, null, slotSize, slotCount, config);
+  }
+
+  private MemoryServer(ServerSocket localListener, RdmaListener rdmaListener,
+      LinuxRendezvous linuxListener, int slotSize, int slotCount, MemoryEndpointConfig config) {
     this.localListener = localListener;
     this.rdmaListener = rdmaListener;
+    this.linuxListener = linuxListener;
     this.slotSize = slotSize;
     this.slotCount = slotCount;
     maxConnections = config == null ? 0 : config.maxConnections();
@@ -100,6 +125,9 @@ public final class MemoryServer implements AutoCloseable {
   }
 
   public SocketAddress localAddress() {
+    if (linuxListener != null) {
+      return linuxListener.localAddress();
+    }
     return localListener != null ? localListener.getLocalSocketAddress() : rdmaListener.localAddress();
   }
 
@@ -139,11 +167,18 @@ public final class MemoryServer implements AutoCloseable {
     try {
       if (localListener != null) {
         localListener.close();
+      } else if (linuxListener != null) {
+        linuxListener.close();
       } else {
         rdmaListener.close();
       }
     } catch (IOException exception) {
       failure = exception;
+    }
+    synchronized (lifecycleLock) {
+      for (int descriptor : linuxNegotiating) {
+        LinuxRendezvous.shutdownPeer(descriptor);
+      }
     }
     for (Socket socket : negotiating) {
       try {
@@ -184,6 +219,13 @@ public final class MemoryServer implements AutoCloseable {
             continue;
           }
           Thread.ofVirtual().name("memory-region-negotiate").start(() -> negotiate(socket));
+        } else if (linuxListener != null) {
+          int descriptor = linuxListener.acceptDescriptor();
+          if (!reserveLinuxNegotiation(descriptor)) {
+            LinuxRendezvous.closePeer(descriptor);
+            continue;
+          }
+          Thread.ofVirtual().name("memfd-negotiate").start(() -> negotiateLinux(descriptor));
         } else {
           RdmaTransport transport = rdmaListener.accept();
           register(new MemoryConnection(transport, null, false));
@@ -243,6 +285,39 @@ public final class MemoryServer implements AutoCloseable {
     }
   }
 
+  private boolean reserveLinuxNegotiation(int descriptor) {
+    if (negotiationSlots != null && !negotiationSlots.tryAcquire()) {
+      return false;
+    }
+    synchronized (lifecycleLock) {
+      if (closed.get() || capacityExceeded()) {
+        if (negotiationSlots != null) {
+          negotiationSlots.release();
+        }
+        return false;
+      }
+      linuxNegotiating.add(descriptor);
+      return true;
+    }
+  }
+
+  private void negotiateLinux(int descriptor) {
+    try {
+      LinuxMemoryTransport transport = linuxListener.completeAccept(descriptor, handshakeTimeoutMillis);
+      synchronized (lifecycleLock) {
+        linuxNegotiating.remove(descriptor);
+      }
+      register(new MemoryConnection(transport, null, false));
+    } catch (IOException | RuntimeException exception) {
+      // completeAccept retains ownership until it releases a failed native socket.
+    } finally {
+      linuxNegotiating.remove(descriptor);
+      if (negotiationSlots != null) {
+        negotiationSlots.release();
+      }
+    }
+  }
+
   private boolean reserveNegotiation(Socket socket) {
     if (negotiationSlots != null && !negotiationSlots.tryAcquire()) {
       return false;
@@ -260,7 +335,7 @@ public final class MemoryServer implements AutoCloseable {
   }
 
   private boolean capacityExceeded() {
-    return (maxConnections > 0 && connections.size() + negotiating.size() >= maxConnections)
+    return (maxConnections > 0 && connections.size() + negotiating.size() + linuxNegotiating.size() >= maxConnections)
         || (maxPendingConnections > 0 && pending.size() >= maxPendingConnections);
   }
 
