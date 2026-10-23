@@ -62,6 +62,58 @@ class ProtectedTransportHardeningTest {
     }
   }
 
+  @Test
+  void malformedFrameLengthsFailClosed() throws Exception {
+    int[] malformed = {0, -1, 1, 28, Integer.MAX_VALUE};
+    for (int length : malformed) {
+      SessionPair pair = createSessions();
+      BytePipe pipe = new BytePipe(4096);
+      ByteBuffer header = ByteBuffer.allocate(4).putInt(length);
+      header.flip();
+      pipe.write(header);
+      try (ProtectedTransport receiver = new ProtectedTransport(new BytePipeReader(pipe), pair.server())) {
+        assertThrows(IOException.class, () -> receiver.read(ByteBuffer.allocate(64)));
+        assertThrows(IOException.class, () -> receiver.read(ByteBuffer.allocate(64)));
+      } finally {
+        pair.client().close();
+      }
+    }
+  }
+
+  @Test
+  void corruptedCiphertextNeverReachesApplication() throws Exception {
+    SessionPair pair = createSessions();
+    BytePipe pipe = new BytePipe(4096);
+    byte[] encrypted = pair.client().protect(new byte[] {3, 7, 11});
+    encrypted[encrypted.length - 1] ^= 0x40;
+    ByteBuffer frame = ByteBuffer.allocate(4 + encrypted.length);
+    frame.putInt(encrypted.length).put(encrypted).flip();
+    pipe.write(frame);
+    try (ProtectedTransport receiver = new ProtectedTransport(new BytePipeReader(pipe), pair.server())) {
+      ByteBuffer destination = ByteBuffer.allocate(3);
+      assertThrows(IOException.class, () -> receiver.read(destination));
+      assertEquals(0, destination.position());
+      assertThrows(IOException.class, () -> receiver.read(destination));
+    } finally {
+      pair.client().close();
+    }
+  }
+
+  @Test
+  void readOnlyOrNonWritableDelegateDoesNotConsumeCallerBytes() throws Exception {
+    SessionPair pair = createSessions();
+    BytePipe pipe = new BytePipe(1);
+    pipe.close();
+    try (ProtectedTransport sender = new ProtectedTransport(pipe, pair.client())) {
+      ByteBuffer source = ByteBuffer.wrap(new byte[] {1, 2, 3});
+      assertEquals(0, sender.write(source));
+      assertEquals(0, source.position());
+      assertFalse(sender.canWrite());
+    } finally {
+      pair.server().close();
+    }
+  }
+
   private static SessionPair createSessions() throws Exception {
     KeyPair clientKey = KeyPairGenerator.getInstance("Ed25519").generateKeyPair();
     KeyPair serverKey = KeyPairGenerator.getInstance("Ed25519").generateKeyPair();

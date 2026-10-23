@@ -399,6 +399,26 @@ Run the deterministic partial-write regression suite on any JDK 25 platform:
 mvn test -Dtest=ProtectedTransportHardeningTest,SecureHandshakeTest
 ```
 
-These tests do not require RDMA hardware. Hardware-specific RDMA failure injection,
-cross-process crash races, fuzzing and extended soak tests remain independent
-verification work.
+The deterministic regression tests cover one-byte partial writes, final-frame
+delivery, partial reads, malformed and oversized frame lengths, tampering,
+closed underlying transports, invalid/truncated control offers, and native
+control-write failure propagation. They run without RDMA hardware.
+
+These tests do not constitute full native ABI or production security
+certification. Hardware-specific RDMA disconnect/failure injection, Windows
+and macOS native security validation, cross-process crash races, fuzzing with
+sanitizers and extended soak tests remain verification gates.
+
+### Phase closeout status (October 2026)
+
+| Phase | Implemented scope | Verification gate |
+| --- | --- | --- |
+| 1: Managed endpoint foundation | Connection lifecycle, configured limits, provider contracts | Previously passed managed endpoint regression tests |
+| 2: Linux native memory | memfd, Unix socket rendezvous, credential admission | Linux memfd cross-process tests previously passed |
+| 3: Windows/macOS | Native named pipes / macOS POSIX shared memory and integration | Linux compatibility passed; native platform execution still unconfirmed |
+| 4: Authenticated records | Ed25519/X25519, derived keys, AEAD/HMAC, protected native endpoints | Linux secure native and crypto tests previously passed; Windows/macOS pending |
+| 5: Managed RDMA | rdma-core rsocket plus bounded managed acceptance and authenticated records | RDMA hardware integration test pending |
+| 6: Hardening | Framing, malformed input, backpressure, teardown ownership regression coverage | Local JDK 25 regression rerun pending; native fuzz/soak pending |
+
+No phase with an outstanding hardware or operating-system test is labelled
+production-verified.
