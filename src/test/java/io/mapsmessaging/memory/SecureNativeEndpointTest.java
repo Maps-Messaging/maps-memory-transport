@@ -122,7 +122,7 @@ class SecureNativeEndpointTest {
     if (System.getProperty("os.name", "").startsWith("Windows")) {
       return null;
     }
-    return Files.createTempDirectory("maps-secure-",
+    return Files.createTempDirectory(Path.of("/tmp"), "ms-",
         PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
   }
 

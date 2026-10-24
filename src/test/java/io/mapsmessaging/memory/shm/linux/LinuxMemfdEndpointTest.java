@@ -33,7 +33,7 @@ class LinuxMemfdEndpointTest {
   @Test
   void sendsAndReceivesThroughAnonymousMemoryWithSeveralPeers() throws Exception {
     assumeTrue(linuxSupported(), "Linux 64-bit native backend only");
-    Path directory = Files.createTempDirectory("maps-memfd-",
+    Path directory = Files.createTempDirectory(Path.of("/tmp"), "ml-",
         PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
     Path socketPath = directory.resolve("endpoint.sock");
     UnixDomainSocketAddress address = UnixDomainSocketAddress.of(socketPath);
@@ -75,7 +75,7 @@ class LinuxMemfdEndpointTest {
   @Test
   void communicatesWithSeparateJvmProcess() throws Exception {
     assumeTrue(linuxSupported(), "Linux 64-bit native backend only");
-    Path directory = Files.createTempDirectory("maps-memfd-process-",
+    Path directory = Files.createTempDirectory(Path.of("/tmp"), "ml-process-",
         PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
     Path socketPath = directory.resolve("endpoint.sock");
     UnixDomainSocketAddress address = UnixDomainSocketAddress.of(socketPath);
@@ -105,7 +105,7 @@ class LinuxMemfdEndpointTest {
   @Test
   void detectsRemoteProcessTerminationAndReclaimsConnection() throws Exception {
     assumeTrue(linuxSupported(), "Linux 64-bit native backend only");
-    Path directory = Files.createTempDirectory("maps-memfd-crash-",
+    Path directory = Files.createTempDirectory(Path.of("/tmp"), "ml-crash-",
         PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
     Path socketPath = directory.resolve("endpoint.sock");
     UnixDomainSocketAddress address = UnixDomainSocketAddress.of(socketPath);
@@ -146,7 +146,7 @@ class LinuxMemfdEndpointTest {
   @Test
   void rejectsPubliclyAccessibleControlDirectory() throws Exception {
     assumeTrue(linuxSupported(), "Linux 64-bit native backend only");
-    Path directory = Files.createTempDirectory("maps-memfd-untrusted-");
+    Path directory = Files.createTempDirectory(Path.of("/tmp"), "ml-untrusted-");
     try {
       Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwxrwxrwx"));
       UnixDomainSocketAddress address = UnixDomainSocketAddress.of(directory.resolve("endpoint.sock"));
