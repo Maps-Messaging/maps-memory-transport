@@ -4,6 +4,7 @@ High-performance shared-memory and RDMA transports for Java.
 
 ## Documentation
 
+- **[Paho MQTT adapter example](examples/paho-memory-client/README.md)**: standalone MQTT 3/5 SPI factories and direct memory API tests, with no Paho dependency in the core library.
 - **[How the transport works](docs/architecture.md)**: endpoints, platform
   backends, shared-memory ring layout, authenticated negotiation, lifecycle,
   Docker and RDMA.
