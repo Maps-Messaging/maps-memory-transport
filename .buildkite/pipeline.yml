@@ -7,5 +7,6 @@ steps:
       - export SONAR_TOKEN
       - mvn clean deploy
       - mvn sonar:sonar -Dsonar.token="$${SONAR_TOKEN}" -Dsonar.branch.name=development
+      - mvn -f examples/paho-memory-client/pom.xml clean deploy
     agents:
       queue: "java_build_queue_aws"

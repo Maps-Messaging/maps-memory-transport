@@ -1,8 +1,0 @@
-steps:
-  - label: ":maven: Build and Deploy Paho Example"
-    command:
-      - export JAVA_HOME=/usr/lib/jvm/java-25-openjdk-amd64
-      - export PATH="$${JAVA_HOME}/bin:$${PATH}"
-      - mvn -f examples/paho-memory-client/pom.xml clean deploy
-    agents:
-      queue: "java_build_queue_aws"
