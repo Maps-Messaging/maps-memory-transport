@@ -66,15 +66,21 @@ class PahoMemoryNativeTest {
   }
 
   private void nativeExchange(int version, DataProtection protection) throws Exception {
-    Files.createDirectories(Path.of("target/data"));
-    Path directory = Files.createTempDirectory(Path.of("target/data"), "paho-");
+    boolean windows = System.getProperty("os.name").startsWith("Windows");
+    Path directory;
+    if (windows) {
+      Files.createDirectories(Path.of("target/data"));
+      directory = Files.createTempDirectory(Path.of("target/data"), "paho-");
+    } else {
+      directory = Files.createTempDirectory(Path.of("/tmp"), "mp-",
+          PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+    }
     try {
       SocketAddress address;
-      if (System.getProperty("os.name").startsWith("Windows")) {
+      if (windows) {
         address = WindowsPipeAddress.of("paho-" + UUID.randomUUID());
       } else {
-        Files.setPosixFilePermissions(directory, PosixFilePermissions.fromString("rwx------"));
-        address = UnixDomainSocketAddress.of(directory.resolve("control.sock"));
+        address = UnixDomainSocketAddress.of(directory.resolve("s"));
       }
       exchange(version, MemoryTransportType.SHARED_MEMORY, address, protection);
     } finally {
