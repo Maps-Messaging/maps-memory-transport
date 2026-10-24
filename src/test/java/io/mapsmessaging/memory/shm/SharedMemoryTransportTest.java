@@ -1,0 +1,479 @@
+/*
+ * Copyright [ 2020 - 2026 ] MapsMessaging B.V.
+ *
+ * Licensed under the Apache License, Version 2.0 with the Commons Clause
+ * (the "License"); you may not use this file except in compliance with the License.
+ */
+package io.mapsmessaging.memory.shm;
+
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import io.mapsmessaging.memory.PeerGenerationChangedException;
+import io.mapsmessaging.memory.internal.MemoryRing;
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.FileSystemException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import org.junit.jupiter.api.Test;
+
+class SharedMemoryTransportTest {
+
+  @Test
+  @SuppressWarnings("java:S2093") // Finally restores the user property and deletes fixtures; no resource is closed here.
+  void rejectsSymbolicLinkInSharedMemoryDirectory() throws Exception {
+    String originalUser = System.getProperty("user.name");
+    String testUser = "symlink-" + UUID.randomUUID();
+    Path sharedRoot = Files.isDirectory(Path.of("/dev/shm"))
+        ? Path.of("/dev/shm/mapsmessaging")
+        : Path.of(System.getProperty("java.io.tmpdir"), "mapsmessaging-shm");
+    Files.createDirectories(sharedRoot);
+    Path target = Files.createTempDirectory("maps-shm-directory-");
+    Path link = sharedRoot.resolve(testUser);
+    try {
+      try {
+        Files.createSymbolicLink(link, target);
+      } catch (FileSystemException exception) {
+        String reason = exception.getReason();
+        boolean windowsPrivilegeMissing = System.getProperty("os.name", "").startsWith("Windows")
+            && reason != null && reason.toLowerCase(java.util.Locale.ROOT).contains("privilege");
+        org.junit.jupiter.api.Assumptions.assumeTrue(!windowsPrivilegeMissing,
+            "Windows does not permit symlink creation for this process: " + exception.getMessage());
+        throw exception;
+      }
+      System.setProperty("user.name", testUser);
+      assertThrows(IOException.class, () -> new SharedMemoryTransport("test", true, 1024, 8));
+      assertFalse(Files.exists(target.resolve("test.shm")));
+    } finally {
+      System.setProperty("user.name", originalUser);
+      Files.deleteIfExists(link);
+      Files.deleteIfExists(target.resolve("test.shm"));
+      Files.deleteIfExists(target);
+    }
+  }
+
+  @Test
+  void transfersBidirectionally() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, 1024, 8);
+         SharedMemoryTransport b = new SharedMemoryTransport(name, false, 1024, 8)) {
+
+      ByteBuffer outbound = ByteBuffer.wrap("hello-b".getBytes(StandardCharsets.UTF_8));
+      assertEquals(outbound.remaining(), a.write(outbound));
+      assertTrue(b.hasData());
+
+      ByteBuffer inbound = ByteBuffer.allocate(64);
+      assertEquals(7, b.read(inbound));
+      inbound.flip();
+      byte[] actual = new byte[inbound.remaining()];
+      inbound.get(actual);
+      assertArrayEquals("hello-b".getBytes(StandardCharsets.UTF_8), actual);
+
+      outbound = ByteBuffer.wrap("hello-a".getBytes(StandardCharsets.UTF_8));
+      assertEquals(outbound.remaining(), b.write(outbound));
+      assertTrue(a.hasData());
+
+      inbound.clear();
+      assertEquals(7, a.read(inbound));
+      inbound.flip();
+      actual = new byte[inbound.remaining()];
+      inbound.get(actual);
+      assertArrayEquals("hello-a".getBytes(StandardCharsets.UTF_8), actual);
+    }
+  }
+
+  @Test
+  void handlesBoundaryPayloadSizes() throws Exception {
+    int slotSize = 256;
+    int slotCount = 4;
+    int slotPayload = slotSize - MemoryRing.SLOT_HEADER_SIZE;
+    int ringPayload = slotPayload * slotCount;
+    int[] sizes = {0, 1, slotPayload, slotPayload + 1, ringPayload};
+
+    for (int size : sizes) {
+      String name = "test-" + UUID.randomUUID();
+      byte[] payload = payload(size, 17);
+      try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, slotSize, slotCount);
+           SharedMemoryTransport b = new SharedMemoryTransport(name, false, slotSize, slotCount)) {
+        ByteBuffer source = ByteBuffer.wrap(payload);
+        assertEquals(size, a.write(source), "size=" + size);
+        assertEquals(0, source.remaining(), "size=" + size);
+        assertEquals(size != 0, b.hasData(), "size=" + size);
+
+        ByteBuffer destination = ByteBuffer.allocate(size);
+        assertEquals(size, b.read(destination), "size=" + size);
+        destination.flip();
+        byte[] actual = new byte[destination.remaining()];
+        destination.get(actual);
+        assertArrayEquals(payload, actual, "size=" + size);
+      }
+    }
+  }
+
+  @Test
+  void supportsPartialReads() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    byte[] payload = payload(700, 23);
+
+    try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, 1024, 8);
+         SharedMemoryTransport b = new SharedMemoryTransport(name, false, 1024, 8)) {
+      assertEquals(payload.length, a.write(ByteBuffer.wrap(payload)));
+
+      ByteBuffer first = ByteBuffer.allocate(200);
+      ByteBuffer second = ByteBuffer.allocate(500);
+      assertEquals(200, b.read(first));
+      assertTrue(b.hasData());
+      assertEquals(500, b.read(second));
+      assertFalse(b.hasData());
+
+      byte[] actual = new byte[700];
+      first.flip();
+      second.flip();
+      first.get(actual, 0, 200);
+      second.get(actual, 200, 500);
+      assertArrayEquals(payload, actual);
+    }
+  }
+
+  @Test
+  void supportsDirectByteBuffers() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    byte[] expected = payload(4096, 29);
+    try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, 1024, 8);
+         SharedMemoryTransport b = new SharedMemoryTransport(name, false, 1024, 8)) {
+      ByteBuffer source = ByteBuffer.allocateDirect(expected.length);
+      source.put(expected).flip();
+      ByteBuffer destination = ByteBuffer.allocateDirect(expected.length);
+      assertEquals(expected.length, a.write(source));
+      assertEquals(expected.length, b.read(destination));
+      destination.flip();
+      byte[] actual = new byte[destination.remaining()];
+      destination.get(actual);
+      assertArrayEquals(expected, actual);
+    }
+  }
+
+  @Test
+  void appliesBackpressureWhenRingIsFull() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, 256, 2);
+         SharedMemoryTransport b = new SharedMemoryTransport(name, false, 256, 2)) {
+      int payloadPerSlot = 256 - MemoryRing.SLOT_HEADER_SIZE;
+      byte[] payload = new byte[1000];
+      int written = a.write(ByteBuffer.wrap(payload));
+      assertEquals(payloadPerSlot * 2, written);
+      assertFalse(a.canWrite());
+
+      ByteBuffer drain = ByteBuffer.allocate(payloadPerSlot);
+      assertEquals(payloadPerSlot, b.read(drain));
+      assertTrue(a.canWrite());
+    }
+  }
+
+  @Test
+  void streamsPayloadLargerThanEntireRingCapacity() throws Exception {
+    int slotSize = 256;
+    int slotCount = 4;
+    int ringPayload = (slotSize - MemoryRing.SLOT_HEADER_SIZE) * slotCount;
+    byte[] payload = payload(ringPayload * 7 + 37, 31);
+    String name = "test-" + UUID.randomUUID();
+
+    try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, slotSize, slotCount);
+         SharedMemoryTransport b = new SharedMemoryTransport(name, false, slotSize, slotCount)) {
+      ByteBuffer source = ByteBuffer.wrap(payload);
+      ByteBuffer destination = ByteBuffer.allocate(payload.length);
+
+      int totalWritten = 0;
+      int totalRead = 0;
+      int cycles = 0;
+      while (source.hasRemaining() || b.hasData()) {
+        if (source.hasRemaining() && a.canWrite()) {
+          totalWritten += a.write(source);
+        }
+        if (b.hasData()) {
+          totalRead += b.read(destination);
+        }
+        assertTrue(++cycles < 1000, "transport failed to make forward progress");
+      }
+
+      assertEquals(payload.length, totalWritten);
+      assertEquals(payload.length, totalRead);
+      destination.flip();
+      byte[] actual = new byte[destination.remaining()];
+      destination.get(actual);
+      assertArrayEquals(payload, actual);
+    }
+  }
+
+  @Test
+  void repeatedlyWrapsAndReusesRing() throws Exception {
+    int slotSize = 256;
+    int slotCount = 4;
+    String name = "test-" + UUID.randomUUID();
+
+    try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, slotSize, slotCount);
+         SharedMemoryTransport b = new SharedMemoryTransport(name, false, slotSize, slotCount)) {
+      for (int i = 0; i < 500; i++) {
+        byte[] expected = payload(1 + (i % 200), i);
+        ByteBuffer source = ByteBuffer.wrap(expected);
+        assertEquals(expected.length, a.write(source));
+
+        ByteBuffer destination = ByteBuffer.allocate(expected.length);
+        assertEquals(expected.length, b.read(destination));
+        destination.flip();
+        byte[] actual = new byte[destination.remaining()];
+        destination.get(actual);
+        assertArrayEquals(expected, actual, "iteration=" + i);
+      }
+    }
+  }
+
+  @Test
+  void streamsConcurrentlyInBothDirections() throws Exception {
+    int slotSize = 512;
+    int slotCount = 8;
+    byte[] aToB = payload(250_000, 41);
+    byte[] bToA = payload(275_000, 73);
+    String name = "test-" + UUID.randomUUID();
+
+    try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, slotSize, slotCount);
+         SharedMemoryTransport b = new SharedMemoryTransport(name, false, slotSize, slotCount)) {
+      CountDownLatch start = new CountDownLatch(1);
+      AtomicReference<Throwable> failure = new AtomicReference<>();
+      byte[] receivedAtA = new byte[bToA.length];
+      byte[] receivedAtB = new byte[aToB.length];
+
+      Thread threadA = Thread.ofPlatform().start(() -> transferBothWays(a, aToB, receivedAtA, start, failure));
+      Thread threadB = Thread.ofPlatform().start(() -> transferBothWays(b, bToA, receivedAtB, start, failure));
+      start.countDown();
+
+      threadA.join(10_000);
+      threadB.join(10_000);
+      assertFalse(threadA.isAlive(), "side A did not complete");
+      assertFalse(threadB.isAlive(), "side B did not complete");
+      if (failure.get() != null) {
+        throw new AssertionError("concurrent transfer failed", failure.get());
+      }
+      assertArrayEquals(bToA, receivedAtA);
+      assertArrayEquals(aToB, receivedAtB);
+    }
+  }
+
+  @Test
+  void rejectsMismatchedLayout() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    try (var _ = new SharedMemoryTransport(name, true, 1024, 8)) {
+      assertThrows(IOException.class, () -> new SharedMemoryTransport(name, false, 2048, 8));
+      assertThrows(IOException.class, () -> new SharedMemoryTransport(name, false, 1024, 16));
+    }
+  }
+
+  @Test
+  void rejectsInvalidConfigurationAndUnsafeNames() {
+    String name = "test-" + UUID.randomUUID();
+    assertThrows(IllegalArgumentException.class, () -> new SharedMemoryTransport("", true, 1024, 8));
+    assertThrows(IllegalArgumentException.class, () -> new SharedMemoryTransport("../escape", true, 1024, 8));
+    assertThrows(IllegalArgumentException.class, () -> new SharedMemoryTransport("contains space", true, 1024, 8));
+    assertThrows(IllegalArgumentException.class, () -> new SharedMemoryTransport(name, true, 255, 8));
+    assertThrows(IllegalArgumentException.class, () -> new SharedMemoryTransport(name, true, 1024, 1));
+  }
+
+  @Test
+  void canReopenExistingRegion() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    Path path;
+    try (SharedMemoryTransport first = new SharedMemoryTransport(name, true, 1024, 8)) {
+      path = first.path();
+      assertTrue(Files.exists(path));
+    }
+    try (SharedMemoryTransport reopened = new SharedMemoryTransport(name, true, 1024, 8)) {
+      assertEquals(path, reopened.path());
+    }
+  }
+
+  @Test
+  void rejectsDuplicateLiveSideOwnership() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    try (var _ = new SharedMemoryTransport(name, true, 1024, 8)) {
+      IOException exception = assertThrows(IOException.class, () -> new SharedMemoryTransport(name, true, 1024, 8));
+      assertTrue(exception.getMessage().contains("already owned"));
+    }
+  }
+
+  @Test
+  void reportsPeerPresenceHeartbeatAndGeneration() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, 1024, 8)) {
+      assertFalse(a.peerPresent());
+      try (SharedMemoryTransport b = new SharedMemoryTransport(name, false, 1024, 8)) {
+        assertTrue(a.peerPresent());
+        assertTrue(b.peerPresent());
+        assertTrue(a.peerHeartbeatMillis() > 0);
+        assertTrue(b.peerHeartbeatMillis() > 0);
+        assertEquals(b.generation(), a.peerGeneration());
+        assertEquals(a.generation(), b.peerGeneration());
+      }
+      assertFalse(a.peerPresent());
+    }
+  }
+
+  @Test
+  void advancesGenerationWhenSideIsReopened() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    long firstGeneration;
+    long firstSession;
+    try (SharedMemoryTransport first = new SharedMemoryTransport(name, true, 1024, 8)) {
+      firstGeneration = first.generation();
+      firstSession = first.sessionId();
+    }
+
+    try (SharedMemoryTransport second = new SharedMemoryTransport(name, true, 1024, 8)) {
+      assertTrue(second.generation() > firstGeneration);
+      assertNotEquals(firstSession, second.sessionId());
+    }
+  }
+
+  @Test
+  void doesNotDeliverDataAddressedToPreviousPeerGeneration() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, 1024, 8)) {
+      SharedMemoryTransport b = new SharedMemoryTransport(name, false, 1024, 8);
+      assertEquals(8, a.write(ByteBuffer.wrap("old-data".getBytes(StandardCharsets.UTF_8))));
+      b.close();
+
+      try (SharedMemoryTransport replacement = new SharedMemoryTransport(name, false, 1024, 8)) {
+        assertTrue(replacement.hasData());
+        assertEquals(0, replacement.read(ByteBuffer.allocate(64)));
+        assertFalse(replacement.hasData());
+      }
+    }
+  }
+
+  @Test
+  void signalsPeerGenerationChangeBeforeMixingNewBytesWithPartialOldFrame() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    try (SharedMemoryTransport a = new SharedMemoryTransport(name, true, 1024, 8)) {
+      SharedMemoryTransport b = new SharedMemoryTransport(name, false, 1024, 8);
+      byte[] oldPayload = payload(100, 7);
+      assertEquals(oldPayload.length, b.write(ByteBuffer.wrap(oldPayload)));
+      assertEquals(10, a.read(ByteBuffer.allocate(10)));
+      b.close();
+
+      try (SharedMemoryTransport replacement = new SharedMemoryTransport(name, false, 1024, 8)) {
+        byte[] newPayload = "new-session".getBytes(StandardCharsets.UTF_8);
+        assertEquals(newPayload.length, replacement.write(ByteBuffer.wrap(newPayload)));
+        assertTrue(a.hasData());
+        assertThrows(PeerGenerationChangedException.class, () -> a.read(ByteBuffer.allocate(64)));
+
+        ByteBuffer destination = ByteBuffer.allocate(64);
+        assertEquals(newPayload.length, a.read(destination));
+        destination.flip();
+        byte[] actual = new byte[destination.remaining()];
+        destination.get(actual);
+        assertArrayEquals(newPayload, actual);
+      }
+    }
+  }
+
+  @Test
+  void closeIsIdempotentAndIoIsRejectedAfterClose() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    SharedMemoryTransport transport = new SharedMemoryTransport(name, true, 1024, 8);
+    transport.close();
+    transport.close();
+    assertFalse(transport.hasData());
+    assertFalse(transport.canWrite());
+    assertFalse(transport.peerPresent());
+    assertEquals(0, transport.peerHeartbeatMillis());
+    assertEquals(0, transport.peerGeneration());
+    assertThrows(IOException.class, () -> transport.write(ByteBuffer.wrap(new byte[] {1})));
+    assertThrows(IOException.class, () -> transport.read(ByteBuffer.allocate(1)));
+  }
+
+  @Test
+  void createsPrivatePosixFileWhenSupported() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    try (SharedMemoryTransport transport = new SharedMemoryTransport(name, true, 1024, 8)) {
+      try {
+        Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(transport.path());
+        assertFalse(permissions.contains(PosixFilePermission.GROUP_READ));
+        assertFalse(permissions.contains(PosixFilePermission.GROUP_WRITE));
+        assertFalse(permissions.contains(PosixFilePermission.GROUP_EXECUTE));
+        assertFalse(permissions.contains(PosixFilePermission.OTHERS_READ));
+        assertFalse(permissions.contains(PosixFilePermission.OTHERS_WRITE));
+        assertFalse(permissions.contains(PosixFilePermission.OTHERS_EXECUTE));
+      } catch (UnsupportedOperationException _) {
+        // Non-POSIX platform.
+      }
+    }
+  }
+
+  @Test
+  void reclaimsSideAfterOwnerProcessCrashes() throws Exception {
+    String name = "test-" + UUID.randomUUID();
+    Path javaExecutable = Path.of(System.getProperty("java.home"), "bin", "java");
+    Process process = new ProcessBuilder(
+        javaExecutable.toString(),
+        "-cp",
+        System.getProperty("java.class.path"),
+        SharedMemoryCrashOwner.class.getName(),
+        name)
+        .inheritIO()
+        .start();
+
+    assertTrue(process.waitFor(10, TimeUnit.SECONDS));
+    assertEquals(0, process.exitValue());
+
+    try (SharedMemoryTransport replacement = new SharedMemoryTransport(name, true, 1024, 8)) {
+      assertTrue(replacement.generation() > 1);
+    }
+  }
+
+  private static void transferBothWays(
+      SharedMemoryTransport transport,
+      byte[] outbound,
+      byte[] inbound,
+      CountDownLatch start,
+      AtomicReference<Throwable> failure) {
+    try {
+      start.await();
+      ByteBuffer source = ByteBuffer.wrap(outbound);
+      ByteBuffer destination = ByteBuffer.wrap(inbound);
+      long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+      while ((source.hasRemaining() || destination.hasRemaining()) && System.nanoTime() < deadline) {
+        if (source.hasRemaining() && transport.canWrite()) {
+          transport.write(source);
+        }
+        if (destination.hasRemaining() && transport.hasData()) {
+          transport.read(destination);
+        }
+        Thread.onSpinWait();
+      }
+      if (source.hasRemaining() || destination.hasRemaining()) {
+        throw new AssertionError("concurrent transport did not complete before deadline");
+      }
+    } catch (Throwable throwable) {
+      failure.compareAndSet(null, throwable);
+    }
+  }
+
+  private static byte[] payload(int size, int seed) {
+    byte[] payload = new byte[size];
+    for (int i = 0; i < payload.length; i++) {
+      payload[i] = (byte) (seed + i * 31);
+    }
+    return payload;
+  }
+}
