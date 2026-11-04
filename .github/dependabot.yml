@@ -1,12 +1,9 @@
 version: 2
 updates:
-  - package-ecosystem: maven
-    directory: /
+  - package-ecosystem: "maven" # See documentation for possible values
+    directory: "/" # Location of package manifests
     schedule:
-      interval: daily
-    target-branch: development
-  - package-ecosystem: maven
-    directory: /benchmarks
-    schedule:
-      interval: daily
-    target-branch: development
+      interval: "daily"
+    # Raise pull requests for version updates
+    # to pip against the `develop` branch
+    target-branch: "development"
